@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -6,9 +6,11 @@ import {
   ChartLine,
   ChevronLeft,
   ChevronRight,
+  Coins,
   HeartPulse,
   Loader2,
   MessagesSquare,
+  ScrollText,
   Settings,
   ShieldAlert,
   UserRoundCog,
@@ -20,8 +22,10 @@ import AccountsPage from "./pages/Accounts";
 import ChatsPage, { Selection } from "./pages/Chats";
 import BackupsPage from "./pages/Backups";
 import HealthPage from "./pages/Health";
+import JournalPage from "./pages/Journal";
 import SettingsPage from "./pages/Settings";
 import UsageHistoryPage from "./pages/UsageHistory";
+import SpendingPage from "./pages/Spending";
 import SwitchDialog from "./SwitchDialog";
 import UpdateBanner from "./UpdateBanner";
 import { useTheme } from "./theme";
@@ -29,9 +33,11 @@ import { useTheme } from "./theme";
 const PAGES = [
   { id: "accounts", label: "Hesaplar", icon: Users, subtitle: "Claude hesaplarını yönet" },
   { id: "history", label: "Kota geçmişi", icon: ChartLine, subtitle: "Hesapların kota kullanımı ve haftalık limit tahmini" },
+  { id: "spending", label: "Harcama", icon: Coins, subtitle: "Hangi proje ve sohbetlerin en çok token kullandığı" },
   { id: "chats", label: "Sohbetler", icon: MessagesSquare, subtitle: "Sohbetlerin ve diğer hesaplara aktarımı" },
   { id: "backups", label: "Yedekler", icon: Archive, subtitle: "Sohbet yedeklerini gör ve eksikleri geri yükle" },
   { id: "health", label: "Sağlık", icon: HeartPulse, subtitle: "Sohbetleri ve yedekleri salt okunur kontrol et" },
+  { id: "journal", label: "İşlem günlüğü", icon: ScrollText, subtitle: "Son işlemleri ve hataları salt okunur gör" },
   { id: "settings", label: "Ayarlar", icon: Settings, subtitle: "Görünüm, sohbet aktarımı ve bildirimler" },
 ] as const;
 type PageId = (typeof PAGES)[number]["id"];
@@ -230,6 +236,15 @@ export default function App() {
     }
   };
 
+  // Registration can fail (taken by another app); the backend's message goes to the toast as is.
+  const handleSwitchShortcut = async (shortcut: string) => {
+    try {
+      setData(await invoke<FullDashboardPayload>("set_switch_shortcut", { shortcut }));
+    } catch (e: any) {
+      setToast({ type: "error", message: String(e) });
+    }
+  };
+
   const handleRestoreBackup = (backupId: string) =>
     runAction("Yedek doğrulanıyor...", async () => {
       const res = await invoke<any>("execute_safe_restore", { backupId });
@@ -258,6 +273,7 @@ export default function App() {
     }
   };
 
+  const notify = useCallback((ok: boolean, message: string) => setToast({ type: ok ? "success" : "error", message }), []);
   const current = PAGES.find((p) => p.id === page)!;
   const accounts = data ? data.accounts : []; // already in the user's stored order
   const counts: Partial<Record<PageId, number>> = data ? { chats: data.sessions.length, backups: data.backups.length } : {};
@@ -393,12 +409,16 @@ export default function App() {
             />
           ) : page === "history" ? (
             <UsageHistoryPage accounts={accounts} threshold={data.automation.switchThresholdPercent} />
+          ) : page === "spending" ? (
+            <SpendingPage />
           ) : page === "chats" ? (
             <ChatsPage data={data} accounts={accounts} saveSelection={saveSelection} onOpenSettings={() => setPage("settings")} onExport={handleExport} />
           ) : page === "backups" ? (
             <BackupsPage backups={data.backups} busy={!!progressStep} onBackup={handleManualBackup} onRestore={handleRestoreBackup} />
           ) : page === "health" ? (
             <HealthPage health={health} busy={healthBusy} onCheck={handleHealthCheck} />
+          ) : page === "journal" ? (
+            <JournalPage notify={notify} />
           ) : (
             <SettingsPage
               data={data}
@@ -414,7 +434,8 @@ export default function App() {
                 }
               }}
               onNotifyOnReset={handleNotifyOnReset}
-              notify={(ok, message) => setToast({ type: ok ? "success" : "error", message })}
+              onSwitchShortcut={handleSwitchShortcut}
+              notify={notify}
             />
           )}
         </div>

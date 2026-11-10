@@ -68,6 +68,8 @@ export interface AutomationSettings {
   autoSwitchEnabled: boolean;
   switchThresholdPercent: number;
   notifyOnReset: boolean;
+  /** Global shortcut that switches to the next account; "" = off. */
+  switchShortcut: string;
   pollIntervalSeconds: number;
   syncSidebarGroups: boolean;
   confirmBeforeDesktopRestart: boolean;
@@ -202,4 +204,29 @@ export interface SearchHit {
   snippet: string;
   matchedRole: "user" | "assistant";
   lastActivityAt: number;
+}
+
+export interface JournalEntry {
+  timestamp: string;
+  operation: string;
+  mode: string;
+  details: string;
+  status: string;
+}
+
+export interface TokenSums {
+  input: number;
+  output: number;
+  cacheWrite: number;
+  cacheRead: number;
+  total: number;
+}
+
+export interface SpendingReport {
+  days: number;
+  totals: { tokens: TokenSums; messages: number; chats: number };
+  projects: { cwd: string; tokens: TokenSums; chats: number; lastActivityAt: number }[];
+  chats: { cliSessionId: string; title: string; cwd: string; tokens: TokenSums; lastActivityAt: number }[];
+  models: { model: string; total: number }[];
+  skippedFiles: number;
 }

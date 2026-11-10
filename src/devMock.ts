@@ -2,7 +2,7 @@
 // main.tsx imports this behind `import.meta.env.DEV`, so it never reaches the production bundle.
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
-import { AccountProfile, EnvironmentReport, FullDashboardPayload, HealthReport, PendingChat, SessionRecord, UsageHistory } from "./types";
+import { AccountProfile, EnvironmentReport, FullDashboardPayload, HealthReport, PendingChat, SessionRecord, SpendingReport, TokenSums, UsageHistory } from "./types";
 
 const now = Date.now();
 const iso = (msFromNow: number) => new Date(now + msFromNow).toISOString();
@@ -69,6 +69,7 @@ const state: FullDashboardPayload = {
     autoSwitchEnabled: false,
     switchThresholdPercent: 90,
     notifyOnReset: true,
+    switchShortcut: "",
     pollIntervalSeconds: 60,
     syncSidebarGroups: true,
     confirmBeforeDesktopRestart: false,
@@ -183,6 +184,20 @@ function history(uuid: string, days: number): UsageHistory {
   };
 }
 
+const journal = [
+  { timestamp: iso(-3 * 60_000), operation: "one-click-switch", mode: "live", details: "ornek@example.com hesabına geçildi; 2 sohbet eklendi.", status: "ok" },
+  { timestamp: iso(-40 * 60_000), operation: "auto-sync", mode: "live", details: "Dosya izleme: Claude Desktop veri klasörüne erişilemedi.", status: "error" },
+  { timestamp: iso(-2 * H), operation: "session-sync", mode: "live", details: "3 sohbet işaretçisi 1 hesaba kopyalandı.", status: "ok" },
+  { timestamp: iso(-2 * H), operation: "backup", mode: "pre-sync", details: "backup-20250115-101500-a1b2c3: 42 dosya, doğrulandı.", status: "ok" },
+  { timestamp: iso(-5 * H), operation: "prune", mode: "auto", details: "Deleted old backup backup-20241201-090000-d4e5f6", status: "ok" },
+  { timestamp: iso(-9 * H), operation: "format-guard", mode: "live", details: "Sohbet dosyalarının biçimi beklenenden farklı; yazma durduruldu.", status: "error" },
+  { timestamp: iso(-26 * H), operation: "update", mode: "check", details: "Güncelleme sunucusuna ulaşılamadı.", status: "error" },
+  { timestamp: iso(-30 * H), operation: "remove-account", mode: "live", details: "Hesap uygulamadan kaldırıldı (sohbetlere dokunulmadı).", status: "ok" },
+  { timestamp: iso(-50 * H), operation: "restore", mode: "safe", details: "2 eksik sohbet geri yüklendi.", status: "ok" },
+  { timestamp: iso(-72 * H), operation: "auto-capture-account", mode: "live", details: "Yeni hesabın girişi kaydedildi.", status: "ok" },
+  { timestamp: iso(-80 * H), operation: "prepare-new-account-login", mode: "live", details: "Yeni hesap girişi hazırlandı.", status: "ok" },
+];
+
 export function installDevMock() {
   mockIPC(
     async (cmd, args: any) => {
@@ -194,6 +209,9 @@ export function installDevMock() {
         case "get_usage_history":
           await sleep(150);
           return history(args.accountUuid, args.days);
+        case "get_spending":
+          await sleep(400);
+          return location.search.includes("bos") ? { ...spending(args.days), totals: { tokens: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: 0 }, messages: 0, chats: 0 }, projects: [], chats: [], models: [] } : spending(args.days);
         case "refresh_all_usage":
           await sleep(700);
           return { dashboard: snap(), notes: ["Örnek: 1 hesap için Claude Desktop kaydı kullanıldı."] };
@@ -218,6 +236,13 @@ export function installDevMock() {
         case "set_notify_on_reset":
           state.automation.notifyOnReset = args.enabled;
           return snap();
+        case "set_switch_shortcut":
+          if (args.shortcut === "Ctrl+Shift+F12") throw "Bu kısayol başka bir uygulamada kullanılıyor"; // preview of the error toast
+          state.automation.switchShortcut = args.shortcut;
+          return snap();
+        case "get_journal":
+          await sleep(200);
+          return journal.slice(0, args.limit);
         case "one_click_switch_account":
           console.info("[devMock] switch", args.targetAccountUuid, "extraChats", args.extraChats);
           await sleep(1200);
@@ -299,4 +324,42 @@ export function installDevMock() {
   if (location.search.includes("secim")) setTimeout(() => emit("switch-choice-needed", { targetAccountUuid: U2 }), 800);
   // The background check's banner; the real app sends it at most once per version.
   setTimeout(() => emit("update-available", { version: "1.1.0" }), 1200);
+}
+
+// Made-up token counts; the 30-day view is a scaled-up 7-day one plus one older project.
+function spending(days: number): SpendingReport {
+  const k = days > 7 ? 3.4 : 1;
+  const t = (total: number): TokenSums => {
+    const v = Math.round(total * k);
+    return { input: Math.round(v * 0.04), output: Math.round(v * 0.06), cacheWrite: Math.round(v * 0.15), cacheRead: v - Math.round(v * 0.04) - Math.round(v * 0.06) - Math.round(v * 0.15), total: v };
+  };
+  const projects = [
+    { cwd: "C:\\Users\\demo\\Projects\\web-shop", tokens: t(48_200_000), chats: 9, lastActivityAt: now - 2 * H },
+    { cwd: "C:\\Users\\demo\\Projects\\api-server", tokens: t(21_700_000), chats: 5, lastActivityAt: now - 20 * H },
+    { cwd: "C:\\Users\\demo\\Documents\\notes", tokens: t(6_400_000), chats: 3, lastActivityAt: now - 50 * H },
+    { cwd: "D:\\work\\data-pipeline", tokens: t(2_150_000), chats: 2, lastActivityAt: now - 90 * H },
+    ...(days > 7 ? [{ cwd: "D:\\work\\old-prototype", tokens: t(900_000), chats: 1, lastActivityAt: now - 400 * H }] : []),
+  ];
+  const chats = [
+    { cliSessionId: "cli-mock-1", title: "Ödeme sayfası yeniden tasarım", cwd: projects[0].cwd, tokens: t(19_800_000), lastActivityAt: now - 2 * H },
+    { cliSessionId: "cli-mock-2", title: "Sipariş API'si testleri", cwd: projects[1].cwd, tokens: t(12_100_000), lastActivityAt: now - 20 * H },
+    { cliSessionId: "cli-mock-3", title: "Sepet hatası", cwd: projects[0].cwd, tokens: t(9_400_000), lastActivityAt: now - 7 * H },
+    { cliSessionId: "cli-unknown", title: "Adsız sohbet", cwd: projects[0].cwd, tokens: t(7_700_000), lastActivityAt: now - 30 * H },
+    { cliSessionId: "cli-mock-4", title: "Toplantı notlarını düzenle", cwd: projects[2].cwd, tokens: t(4_300_000), lastActivityAt: now - 50 * H },
+    { cliSessionId: "cli-mock-5", title: "CSV içe aktarma", cwd: projects[3].cwd, tokens: t(2_150_000), lastActivityAt: now - 90 * H },
+  ];
+  const total = projects.reduce((s, p) => s + p.tokens.total, 0);
+  const sum = (f: keyof TokenSums) => projects.reduce((s, p) => s + p.tokens[f], 0);
+  return {
+    days,
+    totals: { tokens: { input: sum("input"), output: sum("output"), cacheWrite: sum("cacheWrite"), cacheRead: sum("cacheRead"), total }, messages: Math.round(1840 * k), chats: days > 7 ? 20 : 19 },
+    projects,
+    chats,
+    models: [
+      { model: "claude-opus-4", total: Math.round(total * 0.62) },
+      { model: "claude-sonnet-4", total: Math.round(total * 0.31) },
+      { model: "claude-haiku-4", total: total - Math.round(total * 0.62) - Math.round(total * 0.31) },
+    ],
+    skippedFiles: 0,
+  };
 }

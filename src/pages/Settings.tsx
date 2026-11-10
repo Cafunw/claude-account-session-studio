@@ -33,6 +33,7 @@ export default function SettingsPage({
   onQuotaAlert,
   onAutoUpdate,
   onNotifyOnReset,
+  onSwitchShortcut,
   notify,
 }: {
   data: FullDashboardPayload;
@@ -42,6 +43,7 @@ export default function SettingsPage({
   onQuotaAlert: (pct: number) => void;
   onAutoUpdate: (enabled: boolean) => void;
   onNotifyOnReset: (enabled: boolean) => void;
+  onSwitchShortcut: (shortcut: string) => void;
   notify: (ok: boolean, message: string) => void;
 }) {
   const [version, setVersion] = useState("…");
@@ -155,6 +157,28 @@ export default function SettingsPage({
               }`}
             />
           </button>
+        </div>
+      </Section>
+
+      <Section title="Kısayol">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-sm text-zinc-800 dark:text-zinc-200">Sıradaki hesaba geç</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Uygulama tepside çalışırken bu tuşlar, listedeki sıradaki hesaba geçer. Sohbet seçimi gerekiyorsa pencere açılıp sorulur.
+            </p>
+          </div>
+          <Segmented
+            label="Hesap değiştirme kısayolu"
+            value={data.automation.switchShortcut}
+            onChange={onSwitchShortcut}
+            options={[
+              { value: "", label: "Kapalı" },
+              { value: "Ctrl+Alt+K", label: "Ctrl+Alt+K" },
+              { value: "Ctrl+Alt+J", label: "Ctrl+Alt+J" },
+              { value: "Ctrl+Shift+F12", label: "Ctrl+Shift+F12" },
+            ]}
+          />
         </div>
       </Section>
 

@@ -109,6 +109,9 @@ pub struct AutomationSettings {
     /// Notify when a quota window resets after being high
     #[serde(default = "default_true")]
     pub notify_on_reset: bool,
+    /// Global shortcut that switches to the next account ("" = off).
+    #[serde(default)]
+    pub switch_shortcut: String,
     /// Background poll interval in seconds
     pub poll_interval_seconds: u64,
     /// Legacy: sidebar groups are never copied (each would show up as a new section); kept so old configs load.
@@ -160,6 +163,7 @@ impl Default for AutomationSettings {
             auto_switch_enabled: false,
             switch_threshold_percent: 90.0,
             notify_on_reset: true,
+            switch_shortcut: String::new(),
             poll_interval_seconds: 120,
             sync_sidebar_groups: false,
             confirm_before_desktop_restart: true,

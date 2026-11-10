@@ -229,7 +229,7 @@ fn inside_dir(path: &Path, dir: &Path) -> Result<PathBuf, String> {
 }
 
 /// The chats the app lists: one per CLI session id, newest first, with a transcript id.
-fn listed_chats(state: &AppState) -> (PathBuf, Vec<SessionRecord>) {
+pub(crate) fn listed_chats(state: &AppState) -> (PathBuf, Vec<SessionRecord>) {
     let projects = std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("C:\\Users\\Default"))

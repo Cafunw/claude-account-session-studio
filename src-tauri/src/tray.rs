@@ -23,6 +23,25 @@ struct SwitchFinished {
     message: String,
 }
 
+/// What clicking an account in the tray (or pressing the switch shortcut) does. Blocks; call from a thread.
+pub fn switch_to(app: &AppHandle, uuid: &str) {
+    let state = app.state::<AppState>();
+    // Unapproved chats are missing in the target: let the window ask which ones to bring.
+    if switch_plan(&state, uuid).ask {
+        show_main_window(app);
+        let _ = app.emit("switch-choice-needed", serde_json::json!({ "targetAccountUuid": uuid }));
+        return;
+    }
+    let payload = match perform_switch(app, &state, uuid, Vec::new()) {
+        Ok(dash) => {
+            let name = dash.accounts.iter().find(|a| a.account_uuid.eq_ignore_ascii_case(uuid)).map(display_name).unwrap_or_default();
+            SwitchFinished { ok: true, message: format!("{name} hesabına geçildi. Sohbetlerin hazır.") }
+        }
+        Err(e) => SwitchFinished { ok: false, message: e },
+    };
+    let _ = app.emit("switch-finished", payload);
+}
+
 fn build_menu(app: &AppHandle, accounts: &[AccountProfile]) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
     for acc in accounts.iter().filter(|a| !a.is_active) {
@@ -175,24 +194,7 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(uuid) = id.strip_prefix(SWITCH_PREFIX) {
                     let (app, uuid) = (app.clone(), uuid.to_string());
                     // The switch blocks for seconds; keep the tray event loop free.
-                    std::thread::spawn(move || {
-                        let state = app.state::<AppState>();
-                        // Unapproved chats are missing in the target: let the window ask which ones to bring.
-                        if switch_plan(&state, &uuid).ask {
-                            show_main_window(&app);
-                            let _ = app.emit("switch-choice-needed", serde_json::json!({ "targetAccountUuid": uuid }));
-                            return;
-                        }
-                        let result = perform_switch(&app, &state, &uuid, Vec::new());
-                        let payload = match result {
-                            Ok(dash) => {
-                                let name = dash.accounts.iter().find(|a| a.account_uuid.eq_ignore_ascii_case(&uuid)).map(display_name).unwrap_or_default();
-                                SwitchFinished { ok: true, message: format!("{name} hesabına geçildi. Sohbetlerin hazır.") }
-                            }
-                            Err(e) => SwitchFinished { ok: false, message: e },
-                        };
-                        let _ = app.emit("switch-finished", payload);
-                    });
+                    std::thread::spawn(move || switch_to(&app, &uuid));
                 }
             }
         })

@@ -17,8 +17,11 @@ pub mod dpapi;
 pub mod format_guard;
 pub mod fs_watch;
 pub mod health;
+pub mod journal;
 pub mod paths;
 pub mod quota_alert;
+pub mod shortcut;
+pub mod spending;
 pub mod sync_engine;
 pub mod tray;
 pub mod updater;
@@ -788,6 +791,7 @@ pub fn run() {
         .manage(app_state)
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -800,6 +804,7 @@ pub fn run() {
                 background::show_window(&w);
             }
             let _ = tray::setup(app.handle());
+            shortcut::apply_saved(app.handle());
             spawn_account_watcher(app.handle().clone());
             quota_alert::spawn(app.handle().clone());
             format_guard::spawn_alert(app.handle().clone());
@@ -809,6 +814,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_dashboard_state,
             get_usage_history,
+            spending::get_spending,
             refresh_all_usage,
             run_health_check,
             chat_text::search_chats,
@@ -822,6 +828,8 @@ pub fn run() {
             set_sync_selection,
             get_switch_plan,
             update_preferences,
+            journal::get_journal,
+            shortcut::set_switch_shortcut,
             updater::check_for_update,
             updater::install_update,
             updater::set_auto_update,
