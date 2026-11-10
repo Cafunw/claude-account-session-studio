@@ -1,7 +1,9 @@
 import { ReactNode, useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { Copy } from "lucide-react";
-import { AutomationSettings, FullDashboardPayload } from "../types";
+import { invoke } from "@tauri-apps/api/core";
+import { Copy, Loader2 } from "lucide-react";
+import { AutomationSettings, FullDashboardPayload, UpdateInfo } from "../types";
+import { installUpdate } from "../UpdateBanner";
 import { Theme } from "../theme";
 import { Button, Card, Segmented } from "../ui";
 
@@ -29,6 +31,8 @@ export default function SettingsPage({
   onTheme,
   onTransferMode,
   onQuotaAlert,
+  onAutoUpdate,
+  onNotifyOnReset,
   notify,
 }: {
   data: FullDashboardPayload;
@@ -36,12 +40,27 @@ export default function SettingsPage({
   onTheme: (t: Theme) => void;
   onTransferMode: (m: AutomationSettings["transferMode"]) => void;
   onQuotaAlert: (pct: number) => void;
+  onAutoUpdate: (enabled: boolean) => void;
+  onNotifyOnReset: (enabled: boolean) => void;
   notify: (ok: boolean, message: string) => void;
 }) {
   const [version, setVersion] = useState("…");
   useEffect(() => {
     getVersion().then(setVersion, () => setVersion("—"));
   }, []);
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
+  const runUpdate = async (kind: "check" | "install") => {
+    setUpdateBusy(kind);
+    try {
+      if (kind === "check") setUpdate(await invoke<UpdateInfo>("check_for_update"));
+      else await installUpdate();
+    } catch (e: any) {
+      notify(false, String(e));
+    } finally {
+      setUpdateBusy(null);
+    }
+  };
 
   const paths = [
     { label: "Claude Desktop veri klasörü", value: data.environment.activeDataRoot?.path },
@@ -113,6 +132,75 @@ export default function SettingsPage({
             onChange={onQuotaAlert}
             options={[70, 80, 90, 95].map((v) => ({ value: v, label: `%${v}` }))}
           />
+        </div>
+        <div className="mt-4 flex items-center justify-between gap-4 border-t border-zinc-100 pt-4 dark:border-white/[0.06]">
+          <div className="min-w-0">
+            <p id="notify-reset-label" className="text-sm text-zinc-800 dark:text-zinc-200">Limit yenilenince haber ver</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Dolmuş bir hesabın 5 saatlik veya haftalık limiti sıfırlanınca bildirim gelir.</p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={data.automation.notifyOnReset}
+            aria-labelledby="notify-reset-label"
+            onClick={() => onNotifyOnReset(!data.automation.notifyOnReset)}
+            className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#D97757]/50 ${
+              data.automation.notifyOnReset ? "bg-[#D97757]" : "bg-zinc-300 dark:bg-white/20"
+            }`}
+          >
+            <span
+              aria-hidden
+              className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                data.automation.notifyOnReset ? "translate-x-5" : ""
+              }`}
+            />
+          </button>
+        </div>
+      </Section>
+
+      <Section title="Güncellemeler">
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm text-zinc-800 dark:text-zinc-200">Güncellemeleri otomatik kur</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Açıkken GitHub'da yeni sürüm aranır ve açılışta kurulur. Kapalıyken yalnızca sen denetleyince bağlanır.
+              </p>
+            </div>
+            <Segmented
+              label="Güncellemeleri otomatik kur"
+              value={data.automation.autoUpdate}
+              onChange={onAutoUpdate}
+              options={[
+                { value: true, label: "Açık" },
+                { value: false, label: "Kapalı" },
+              ]}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4 border-t border-zinc-100 pt-4 dark:border-white/[0.06]">
+            <div className="min-w-0 text-sm" aria-live="polite">
+              <p className="text-zinc-800 dark:text-zinc-200">
+                Kurulu sürüm <span className="font-medium tabular-nums">v{version}</span>
+              </p>
+              {update && (
+                <p className={`text-xs ${update.available ? "font-medium text-[#C2603F] dark:text-[#E89A7E]" : "text-zinc-500 dark:text-zinc-400"}`}>
+                  {update.available ? `v${update.version} mevcut` : "Güncelsin"}
+                </p>
+              )}
+            </div>
+            <div className="flex shrink-0 gap-2">
+              {update?.available && (
+                <Button variant="primary" onClick={() => runUpdate("install")} disabled={!!updateBusy}>
+                  {updateBusy === "install" && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
+                  {updateBusy === "install" ? "Güncelleniyor…" : "Şimdi güncelle"}
+                </Button>
+              )}
+              <Button onClick={() => runUpdate("check")} disabled={!!updateBusy}>
+                {updateBusy === "check" && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
+                {updateBusy === "check" ? "Denetleniyor…" : "Şimdi denetle"}
+              </Button>
+            </div>
+          </div>
         </div>
       </Section>
 

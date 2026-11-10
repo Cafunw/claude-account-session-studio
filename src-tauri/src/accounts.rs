@@ -106,6 +106,9 @@ pub struct AutomationSettings {
     pub auto_switch_enabled: bool,
     /// Quota-alert threshold percentage (50..=100) for the 5h/7d windows
     pub switch_threshold_percent: f64,
+    /// Notify when a quota window resets after being high
+    #[serde(default = "default_true")]
+    pub notify_on_reset: bool,
     /// Background poll interval in seconds
     pub poll_interval_seconds: u64,
     /// Legacy: sidebar groups are never copied (each would show up as a new section); kept so old configs load.
@@ -116,6 +119,9 @@ pub struct AutomationSettings {
     /// "all": every chat goes everywhere. Old configs get "ask" on purpose (asking is the safe default).
     #[serde(default = "default_transfer_mode")]
     pub transfer_mode: String,
+    /// Checks GitHub Releases in the background and installs updates; off = never contacts GitHub by itself.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
     /// Legacy, replaced by `transfer_mode`; kept so old configs load.
     #[serde(default)]
     pub sync_only_selected: bool,
@@ -131,6 +137,16 @@ pub struct AutomationSettings {
     /// A missing key means every account.
     #[serde(default)]
     pub selected_targets: std::collections::HashMap<String, Vec<String>>,
+    /// Accounts removed from the app (uuids); skipped by discovery and sync until signed in again.
+    #[serde(default)]
+    pub hidden_accounts: Vec<String>,
+    /// User-chosen account order (uuids); unlisted accounts follow.
+    #[serde(default)]
+    pub account_order: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_transfer_mode() -> String {
@@ -143,15 +159,19 @@ impl Default for AutomationSettings {
             auto_sync_enabled: true,
             auto_switch_enabled: false,
             switch_threshold_percent: 90.0,
+            notify_on_reset: true,
             poll_interval_seconds: 120,
             sync_sidebar_groups: false,
             confirm_before_desktop_restart: true,
             transfer_mode: default_transfer_mode(),
+            auto_update: true,
             sync_only_selected: false,
             selected_chats: Vec::new(),
             selected_groups: Vec::new(),
             selected_folders: Vec::new(),
             selected_targets: Default::default(),
+            hidden_accounts: Vec::new(),
+            account_order: Vec::new(),
         }
     }
 }
@@ -282,6 +302,9 @@ pub fn discover_accounts_in_root(
     stored_accounts: &[AccountProfile],
 ) -> Vec<AccountProfile> {
     let last_known_uuid = crate::paths::read_last_known_account(&data_root.join("config.json"));
+    // Read from disk so every caller (dashboard, sync, switch plan, quota alert) skips them alike.
+    let hidden = load_studio_config(studio_dir).automation.hidden_accounts;
+    let is_hidden = |uuid: &str| crate::account_admin::is_hidden(&hidden, uuid, last_known_uuid.as_deref());
 
     // Read-only lookup from `.claude.json` -> `oauthAccount` and `.claude/.credentials.json` if available
     let mut cli_email_by_uuid: HashMap<String, (String, String, String, String)> = HashMap::new();
@@ -323,6 +346,7 @@ pub fn discover_accounts_in_root(
                         if let Ok(creds_raw) = fs::read_to_string(&creds_path) {
                             // Mirror the CLI's current token (it refreshes it itself) so usage stays fetchable.
                             if !uuid.is_empty()
+                                && !is_hidden(&uuid)
                                 && creds_raw.contains("accessToken")
                                 && load_dpapi_credentials(studio_dir, &uuid).ok().as_deref() != Some(creds_raw.as_str())
                             {
@@ -375,6 +399,9 @@ pub fn discover_accounts_in_root(
                 continue;
             }
             let account_uuid = acc_entry.file_name().to_string_lossy().into_owned();
+            if is_hidden(&account_uuid) {
+                continue;
+            }
             let Ok(org_dirs) = fs::read_dir(acc_entry.path()) else {
                 continue;
             };
@@ -499,9 +526,10 @@ pub fn discover_accounts_in_root(
 
     // Also include any manually registered accounts that don't have a session folder yet
     for stored in stored_accounts {
-        if !discovered
-            .iter()
-            .any(|d| d.account_uuid.eq_ignore_ascii_case(&stored.account_uuid))
+        if !is_hidden(&stored.account_uuid)
+            && !discovered
+                .iter()
+                .any(|d| d.account_uuid.eq_ignore_ascii_case(&stored.account_uuid))
         {
             let mut copy = stored.clone();
             copy.is_active = last_known_uuid

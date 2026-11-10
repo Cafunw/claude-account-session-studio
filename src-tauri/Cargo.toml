@@ -30,6 +30,7 @@ tauri-plugin-notification = "2"
 uuid = { version = "1.11", features = ["v4"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-updater = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

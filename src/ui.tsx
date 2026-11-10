@@ -69,6 +69,7 @@ const buttonVariants = {
   primary: "bg-zinc-900 text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white",
   outline: "border border-zinc-200 bg-white text-zinc-800 hover:bg-zinc-50 dark:border-white/10 dark:bg-white/[0.03] dark:text-zinc-200 dark:hover:bg-white/[0.08]",
   ghost: "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.06] dark:hover:text-zinc-100",
+  danger: "bg-rose-600 text-white hover:bg-rose-700 dark:bg-rose-500 dark:hover:bg-rose-400",
 };
 
 export function Button({
@@ -204,14 +205,16 @@ export function Avatar({ name, seed }: { name: string; seed: string }) {
 }
 
 /** Kebab menu: closes on Esc (focus back to the button) and on a click outside. */
-export function Menu({ label, items }: { label: string; items: { label: string; onSelect: () => void }[] }) {
+export type MenuItem = { label: string; onSelect: () => void; disabled?: boolean; danger?: boolean; title?: string };
+
+export function Menu({ label, items }: { label: string; items: MenuItem[] }) {
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
-    wrap.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    wrap.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
     const onDown = (e: MouseEvent) => !wrap.current?.contains(e.target as Node) && setOpen(false);
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -240,17 +243,21 @@ export function Menu({ label, items }: { label: string; items: { label: string; 
         <MoreVertical className="h-4 w-4" />
       </button>
       {open && (
-        <div role="menu" className="absolute right-0 top-9 z-20 min-w-[9rem] rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-white/10 dark:bg-[#1e1f24] dark:shadow-black/40">
+        <div role="menu" className="absolute right-0 top-9 z-20 min-w-[9rem] whitespace-nowrap rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-white/10 dark:bg-[#1e1f24] dark:shadow-black/40">
           {items.map((it) => (
             <button
               key={it.label}
               type="button"
               role="menuitem"
+              disabled={it.disabled}
+              title={it.title}
               onClick={() => {
                 setOpen(false);
                 it.onSelect();
               }}
-              className={`block w-full rounded-md px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-white/[0.08] ${focusRing}`}
+              className={`block w-full rounded-md px-3 py-1.5 text-left text-sm hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent dark:hover:bg-white/[0.08] ${
+                it.danger ? "text-rose-600 dark:text-rose-400" : "text-zinc-700 dark:text-zinc-200"
+              } ${focusRing}`}
             >
               {it.label}
             </button>

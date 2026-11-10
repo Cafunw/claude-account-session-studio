@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Archive,
+  ChartLine,
   ChevronLeft,
   ChevronRight,
   HeartPulse,
@@ -20,11 +21,14 @@ import ChatsPage, { Selection } from "./pages/Chats";
 import BackupsPage from "./pages/Backups";
 import HealthPage from "./pages/Health";
 import SettingsPage from "./pages/Settings";
+import UsageHistoryPage from "./pages/UsageHistory";
 import SwitchDialog from "./SwitchDialog";
+import UpdateBanner from "./UpdateBanner";
 import { useTheme } from "./theme";
 
 const PAGES = [
   { id: "accounts", label: "Hesaplar", icon: Users, subtitle: "Claude hesaplarını yönet" },
+  { id: "history", label: "Kota geçmişi", icon: ChartLine, subtitle: "Hesapların kota kullanımı ve haftalık limit tahmini" },
   { id: "chats", label: "Sohbetler", icon: MessagesSquare, subtitle: "Sohbetlerin ve diğer hesaplara aktarımı" },
   { id: "backups", label: "Yedekler", icon: Archive, subtitle: "Sohbet yedeklerini gör ve eksikleri geri yükle" },
   { id: "health", label: "Sağlık", icon: HeartPulse, subtitle: "Sohbetleri ve yedekleri salt okunur kontrol et" },
@@ -35,7 +39,7 @@ type PageId = (typeof PAGES)[number]["id"];
 export default function App() {
   const [data, setData] = useState<FullDashboardPayload | null>(null);
   const [progressStep, setProgressStep] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [toast, setToast] = useState<{ type: "success" | "error"; message: string; action?: { label: string; run: () => void } } | null>(null);
   const [health, setHealth] = useState<HealthReport | null>(null);
   const [healthBusy, setHealthBusy] = useState(false);
   const [usageBusy, setUsageBusy] = useState(false);
@@ -43,6 +47,7 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useTheme();
   const [plan, setPlan] = useState<{ acc: AccountProfile; pending: PendingChat[] } | null>(null);
+  const [updateVersion, setUpdateVersion] = useState<string | null>(null);
 
   const fetchState = async () => {
     try {
@@ -75,6 +80,7 @@ export default function App() {
         }
       }),
       listen("sessions-synced", () => fetchState()),
+      listen<{ version: string }>("update-available", (event) => setUpdateVersion(event.payload.version)),
       listen("account-detected", () => {
         fetchState();
         setToast({
@@ -98,6 +104,22 @@ export default function App() {
     const t = setTimeout(() => setToast(null), 6000);
     return () => clearTimeout(t);
   }, [toast]);
+
+  const handleExport = async (cliSessionId: string) => {
+    try {
+      const path = await invoke<string>("export_chat_markdown", { cliSessionId });
+      setToast({
+        type: "success",
+        message: `Kaydedildi: ${path.split(/[\\/]/).pop()}`,
+        action: {
+          label: "Klasörde göster",
+          run: () => invoke("reveal_in_explorer", { path }).catch((e) => setToast({ type: "error", message: String(e) })),
+        },
+      });
+    } catch (e: any) {
+      setToast({ type: "error", message: String(e) });
+    }
+  };
 
   // Runs a long backend action behind the progress overlay.
   const runAction = async (firstStep: string, action: () => Promise<void>) => {
@@ -149,6 +171,23 @@ export default function App() {
     }
   };
 
+  const handleMove = async (acc: AccountProfile, direction: "up" | "down") => {
+    try {
+      setData(await invoke<FullDashboardPayload>("move_account", { accountUuid: acc.accountUuid, direction }));
+    } catch (e: any) {
+      setToast({ type: "error", message: String(e) });
+    }
+  };
+
+  const handleRemove = async (acc: AccountProfile) => {
+    try {
+      setData(await invoke<FullDashboardPayload>("remove_account", { accountUuid: acc.accountUuid }));
+      setToast({ type: "success", message: `${accountName(acc).name} uygulamadan kaldırıldı. Sohbetlerin yerinde.` });
+    } catch (e: any) {
+      setToast({ type: "error", message: String(e) });
+    }
+  };
+
   const handleAddAccount = () =>
     runAction("Mevcut hesap kaydediliyor...", async () => {
       setData(await invoke<FullDashboardPayload>("one_click_start_new_account_login"));
@@ -183,6 +222,14 @@ export default function App() {
     }
   };
 
+  const handleNotifyOnReset = async (enabled: boolean) => {
+    try {
+      setData(await invoke<FullDashboardPayload>("set_notify_on_reset", { enabled }));
+    } catch (e: any) {
+      setToast({ type: "error", message: String(e) });
+    }
+  };
+
   const handleRestoreBackup = (backupId: string) =>
     runAction("Yedek doğrulanıyor...", async () => {
       const res = await invoke<any>("execute_safe_restore", { backupId });
@@ -212,7 +259,7 @@ export default function App() {
   };
 
   const current = PAGES.find((p) => p.id === page)!;
-  const accounts = data ? [...data.accounts].sort((a, b) => Number(b.isActive) - Number(a.isActive)) : [];
+  const accounts = data ? data.accounts : []; // already in the user's stored order
   const counts: Partial<Record<PageId, number>> = data ? { chats: data.sessions.length, backups: data.backups.length } : {};
   const running = !!data?.environment.desktopRunning;
 
@@ -303,6 +350,14 @@ export default function App() {
             </div>
           )}
 
+          {updateVersion && (
+            <UpdateBanner
+              version={updateVersion}
+              onDismiss={() => setUpdateVersion(null)}
+              onError={(message) => setToast({ type: "error", message })}
+            />
+          )}
+
           <header className="mb-6 flex items-center gap-4">
             <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-sky-200 dark:border-sky-400/25 bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300">
               <current.icon className="h-6 w-6" aria-hidden />
@@ -333,9 +388,13 @@ export default function App() {
               onAdd={handleAddAccount}
               onSwitch={handleSwitch}
               onRename={handleRename}
+              onMove={handleMove}
+              onRemove={handleRemove}
             />
+          ) : page === "history" ? (
+            <UsageHistoryPage accounts={accounts} threshold={data.automation.switchThresholdPercent} />
           ) : page === "chats" ? (
-            <ChatsPage data={data} accounts={accounts} saveSelection={saveSelection} onOpenSettings={() => setPage("settings")} />
+            <ChatsPage data={data} accounts={accounts} saveSelection={saveSelection} onOpenSettings={() => setPage("settings")} onExport={handleExport} />
           ) : page === "backups" ? (
             <BackupsPage backups={data.backups} busy={!!progressStep} onBackup={handleManualBackup} onRestore={handleRestoreBackup} />
           ) : page === "health" ? (
@@ -347,6 +406,14 @@ export default function App() {
               onTheme={setTheme}
               onTransferMode={(transferMode: AutomationSettings["transferMode"]) => saveSelection({ transferMode })}
               onQuotaAlert={handleQuotaAlert}
+              onAutoUpdate={async (enabled) => {
+                try {
+                  setData(await invoke<FullDashboardPayload>("set_auto_update", { enabled }));
+                } catch (e: any) {
+                  setToast({ type: "error", message: String(e) });
+                }
+              }}
+              onNotifyOnReset={handleNotifyOnReset}
               notify={(ok, message) => setToast({ type: ok ? "success" : "error", message })}
             />
           )}
@@ -386,6 +453,15 @@ export default function App() {
           >
             {toast.message}
           </button>
+          {toast.action && (
+            <button
+              type="button"
+              onClick={toast.action.run}
+              className={`mt-1.5 w-full rounded-xl border border-zinc-200 bg-white px-4 py-2 text-left text-sm font-medium text-[#A8492A] shadow-lg dark:border-white/10 dark:bg-[#17181c] dark:text-[#EBA488] ${focusRing}`}
+            >
+              {toast.action.label}
+            </button>
+          )}
         </div>
       )}
     </div>

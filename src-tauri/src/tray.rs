@@ -14,6 +14,7 @@ use tauri::{
 
 const TRAY_ID: &str = "main-tray";
 const SWITCH_PREFIX: &str = "switch:";
+const REFRESH_ID: &str = "refresh-usage";
 static DOT_LEVEL: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Clone, Serialize)]
@@ -26,15 +27,22 @@ fn build_menu(app: &AppHandle, accounts: &[AccountProfile]) -> tauri::Result<Men
     let menu = Menu::new(app)?;
     for acc in accounts.iter().filter(|a| !a.is_active) {
         let id = format!("{SWITCH_PREFIX}{}", acc.account_uuid);
-        let label = format!("{} hesabına geç", display_name(acc));
-        menu.append(&MenuItem::with_id(app, id, label, true, None::<&str>)?)?;
+        menu.append(&MenuItem::with_id(app, id, switch_label(&display_name(acc), &acc.usage), true, None::<&str>)?)?;
     }
     if accounts.iter().any(|a| !a.is_active) {
         menu.append(&PredefinedMenuItem::separator(app)?)?;
     }
+    menu.append(&MenuItem::with_id(app, REFRESH_ID, "Limitleri yenile", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "show", "Claude Hesap Yöneticisini Aç", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "quit", "Çıkış", true, None::<&str>)?)?;
     Ok(menu)
+}
+
+fn switch_label(name: &str, usage: &UsageMetrics) -> String {
+    match fullest(usage) {
+        Some(p) => format!("{name} hesabına geç · %{p:.0}"),
+        None => format!("{name} hesabına geç · veri yok"),
+    }
 }
 
 /// Rebuilds the menu and tooltip from the current account list.
@@ -131,6 +139,12 @@ mod tests {
     }
 
     #[test]
+    fn switch_label_shows_fuller_window() {
+        assert_eq!(switch_label("ornek", &usage(Some(5.0), Some(23.0))), "ornek hesabına geç · %23");
+        assert_eq!(switch_label("ornek", &usage(None, None)), "ornek hesabına geç · veri yok");
+    }
+
+    #[test]
     fn tooltip_and_dot_pixels() {
         assert_eq!(tooltip_text("ornek", Some(&usage(None, Some(23.0)))), "Claude: ornek · haftalık %23");
         assert_eq!(tooltip_text("ornek", Some(&usage(Some(5.0), Some(23.0)))), "Claude: ornek · haftalık %23 · 5 saatlik %5");
@@ -150,6 +164,13 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
             "quit" => app.exit(0),
+            REFRESH_ID => {
+                let app = app.clone();
+                // Network calls: keep the tray event loop free. The command refreshes the tray itself.
+                std::thread::spawn(move || {
+                    let _ = crate::refresh_all_usage(app.clone(), app.state::<AppState>());
+                });
+            }
             id => {
                 if let Some(uuid) = id.strip_prefix(SWITCH_PREFIX) {
                     let (app, uuid) = (app.clone(), uuid.to_string());

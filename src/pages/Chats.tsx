@@ -1,7 +1,8 @@
-import React, { useMemo, useState } from "react";
-import { Folder, FolderOpen, Search, Star } from "lucide-react";
-import { AccountProfile, AutomationSettings, FullDashboardPayload, SessionRecord } from "../types";
-import { accountName, Card, formatDateShort, focusRing } from "../ui";
+import React, { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { FileDown, Folder, FolderOpen, Loader2, Search, Star } from "lucide-react";
+import { AccountProfile, AutomationSettings, FullDashboardPayload, SearchHit, SessionRecord } from "../types";
+import { accountName, Card, formatDateShort, focusRing, Segmented } from "../ui";
 
 export type Selection = Pick<
   AutomationSettings,
@@ -12,6 +13,37 @@ const toggleIn = (list: string[], id: string) => (list.includes(id) ? list.filte
 // Same rule as `folder_key` in sync_engine.rs: Windows paths, case-insensitive, no trailing slash.
 const folderKey = (path: string) => path.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
 const chatFolder = (s: SessionRecord) => s.cwd || s.originCwd;
+// Same folding as `fold` in chat_text.rs (İ, I, ı count as i), so the highlight lands where the backend matched.
+const fold = (cs: string[]) => cs.map((c) => (c === "İ" || c === "I" || c === "ı" ? "i" : c.toLowerCase()));
+function Highlighted({ text, query }: { text: string; query: string }) {
+  const t = [...text];
+  const q = fold([...query.trim()]);
+  const f = fold(t);
+  const at = q.length ? f.findIndex((_, i) => q.every((c, j) => f[i + j] === c)) : -1;
+  if (at < 0) return <>{text}</>;
+  return (
+    <>
+      {t.slice(0, at).join("")}
+      <mark className="rounded bg-[#D97757]/20 px-0.5 text-inherit">{t.slice(at, at + q.length).join("")}</mark>
+      {t.slice(at + q.length).join("")}
+    </>
+  );
+}
+
+function ExportButton({ title, onClick }: { title: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title="Markdown olarak kaydet"
+      aria-label={`"${title}" sohbetini Markdown olarak kaydet`}
+      className={`shrink-0 rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/10 dark:hover:text-zinc-200 ${focusRing}`}
+    >
+      <FileDown className="h-4 w-4" aria-hidden />
+    </button>
+  );
+}
+
 const checkboxClass = `h-4 w-4 shrink-0 cursor-pointer rounded accent-[#D97757] disabled:cursor-default disabled:opacity-40 ${focusRing}`;
 
 export default function ChatsPage({
@@ -19,13 +51,46 @@ export default function ChatsPage({
   accounts,
   saveSelection,
   onOpenSettings,
+  onExport,
 }: {
   data: FullDashboardPayload;
   accounts: AccountProfile[];
   saveSelection: (patch: Partial<Selection>) => void;
   onOpenSettings: () => void;
+  onExport: (cliSessionId: string) => void;
 }) {
   const [searchQuery, setSearchQuery] = useState("");
+  const [mode, setMode] = useState<"title" | "content">("title");
+  const [hits, setHits] = useState<SearchHit[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const contentQuery = searchQuery.trim();
+
+  // Content search runs in the backend; the stale flag drops a response that a newer query has outdated.
+  useEffect(() => {
+    setHits(null);
+    setSearchError(null);
+    if (mode !== "content" || contentQuery.length < 3) {
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    let stale = false;
+    const t = setTimeout(async () => {
+      try {
+        const r = await invoke<SearchHit[]>("search_chats", { query: contentQuery });
+        if (!stale) setHits(r);
+      } catch (e) {
+        if (!stale) setSearchError(String(e));
+      } finally {
+        if (!stale) setSearching(false);
+      }
+    }, 400);
+    return () => {
+      stale = true;
+      clearTimeout(t);
+    };
+  }, [mode, contentQuery]);
   const filteredSessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return data.sessions;
@@ -125,6 +190,7 @@ export default function ChatsPage({
           <p className="truncate font-mono text-[11px] text-zinc-400">{s.cwd || "klasör yok"}</p>
         </div>
         {selecting && own && !viaGroup && !viaFolder && targetChips(`chat:${s.cliSessionId}`)}
+        {s.cliSessionId && <ExportButton title={s.title} onClick={() => onExport(s.cliSessionId!)} />}
         <span className="w-24 shrink-0 text-right text-xs tabular-nums text-zinc-400">{formatDateShort(s.lastActivityAt)}</span>
       </li>
     );
@@ -149,11 +215,21 @@ export default function ChatsPage({
               type="search"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Başlık veya klasör ara"
+              placeholder={mode === "content" ? "Sohbet içinde ara (en az 3 harf)" : "Başlık veya klasör ara"}
               aria-label="Sohbet ara"
-              className="h-9 w-full rounded-lg border border-zinc-200 dark:border-white/10 bg-white dark:bg-[#17181c] pl-9 pr-3 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:border-[#D97757] focus:outline-none focus:ring-2 focus:ring-[#D97757]/25"
+              className="h-9 w-full rounded-lg border border-zinc-200 dark:border-white/10 bg-white dark:bg-[#17181c] pl-9 pr-9 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:border-[#D97757] focus:outline-none focus:ring-2 focus:ring-[#D97757]/25"
             />
+            {searching && <Loader2 className="absolute right-3 top-2.5 h-4 w-4 animate-spin text-[#D97757]" role="status" aria-label="Aranıyor" />}
           </div>
+          <Segmented
+            label="Arama yeri"
+            options={[
+              { value: "title", label: "Başlıkta" },
+              { value: "content", label: "İçerikte" },
+            ]}
+            value={mode}
+            onChange={setMode}
+          />
           {selecting ? (
             <span className="max-w-[45%] text-pretty text-right text-[13px] leading-snug text-zinc-600 dark:text-zinc-400">
               Önceden onayla: işaretlenenler sormadan aktarılır
@@ -182,6 +258,30 @@ export default function ChatsPage({
         )}
       </Card>
 
+      {mode === "content" ? (
+        <Card className="overflow-hidden">
+          <ul className="divide-y divide-zinc-100 dark:divide-white/[0.06]">
+            {(hits ?? []).map((h) => (
+              <li key={h.cliSessionId} className="flex items-center gap-3 px-4 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm text-zinc-800 dark:text-zinc-200">{h.title}</p>
+                  <p className="text-pretty text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                    <span className="mr-1.5 font-medium text-zinc-600 dark:text-zinc-300">{h.matchedRole === "user" ? "Sen:" : "Claude:"}</span>
+                    <Highlighted text={h.snippet} query={contentQuery} />
+                  </p>
+                </div>
+                <ExportButton title={h.title} onClick={() => onExport(h.cliSessionId)} />
+                <span className="w-24 shrink-0 text-right text-xs tabular-nums text-zinc-400">{formatDateShort(h.lastActivityAt)}</span>
+              </li>
+            ))}
+            {!searching && (
+              <li className="py-8 text-center text-sm text-zinc-500 dark:text-zinc-400">
+                {searchError ?? (contentQuery.length < 3 ? "Aramak için en az 3 harf yaz." : hits && hits.length === 0 ? "Sonuç yok." : null)}
+              </li>
+            )}
+          </ul>
+        </Card>
+      ) : (
       <Card className="overflow-hidden">
         <ul className="divide-y divide-zinc-100 dark:divide-white/[0.06]">
           {sections.map(({ g, items }) => (
@@ -237,6 +337,7 @@ export default function ChatsPage({
           {filteredSessions.length === 0 && <li className="py-8 text-center text-sm text-zinc-500 dark:text-zinc-400">Sonuç yok.</li>}
         </ul>
       </Card>
+      )}
     </div>
   );
 }

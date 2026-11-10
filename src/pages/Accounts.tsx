@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ArrowRightLeft, CircleCheck, Clock, Gauge, Plus, RefreshCw, Users } from "lucide-react";
 import { AccountProfile } from "../types";
+import RemoveAccountDialog from "../RemoveAccountDialog";
 import { accountName, Avatar, Badge, Button, Card, formatAgo, Menu, Meter, QuotaBar, Segmented, StatCard } from "../ui";
 
 type QuotaView = "both" | "five" | "week";
@@ -8,18 +9,36 @@ type QuotaView = "both" | "five" | "week";
 // The fuller of the two windows decides how much is left.
 const fuller = (a: AccountProfile) => Math.max(a.usage.fiveHour?.utilization ?? 0, a.usage.sevenDay?.utilization ?? 0);
 
+const hasData = (a: AccountProfile) => !!(a.usage.fiveHour || a.usage.sevenDay);
+
+/** uuid of the account with the lowest fuller window; needs at least two accounts with data. A tie gives none. */
+function emptiestUuid(accounts: AccountProfile[]): string | null {
+  const ranked = accounts.filter(hasData).sort((a, b) => fuller(a) - fuller(b));
+  return ranked.length >= 2 && fuller(ranked[0]) < fuller(ranked[1]) ? ranked[0].accountUuid : null;
+}
+
 function AccountRow({
   acc,
   view,
   busy,
   onSwitch,
   onRename,
+  first,
+  last,
+  onMove,
+  onRemove,
+  emptiest,
 }: {
   acc: AccountProfile;
+  emptiest: boolean;
   view: QuotaView;
   busy: boolean;
   onSwitch: () => void;
   onRename: (label: string) => void;
+  first: boolean;
+  last: boolean;
+  onMove: (direction: "up" | "down") => void;
+  onRemove: () => void;
 }) {
   const { name, hint } = accountName(acc);
   const [editing, setEditing] = useState(false);
@@ -65,6 +84,7 @@ function AccountRow({
             <h3 className="truncate text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">{name}</h3>
           )}
           {acc.planType !== "Plan bilinmiyor" && <Badge>{acc.planType}</Badge>}
+          {emptiest && <Badge tone="green">En boş</Badge>}
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
           {hint && <span className="truncate font-mono text-zinc-400">{hint}</span>}
@@ -107,7 +127,21 @@ function AccountRow({
             Geç
           </Button>
         )}
-        <Menu label={`${name} için işlemler`} items={[{ label: "İsim ver", onSelect: () => setEditing(true) }]} />
+        <Menu
+          label={`${name} için işlemler`}
+          items={[
+            { label: "İsim ver", onSelect: () => setEditing(true) },
+            { label: "Yukarı taşı", onSelect: () => onMove("up"), disabled: first },
+            { label: "Aşağı taşı", onSelect: () => onMove("down"), disabled: last },
+            {
+              label: "Hesabı kaldır",
+              onSelect: onRemove,
+              danger: true,
+              disabled: acc.isActive || busy,
+              title: acc.isActive ? "Claude Desktop'ta açık olan hesap kaldırılamaz; önce başka bir hesaba geç." : undefined,
+            },
+          ]}
+        />
       </div>
     </Card>
   );
@@ -122,6 +156,8 @@ export default function AccountsPage({
   onAdd,
   onSwitch,
   onRename,
+  onMove,
+  onRemove,
 }: {
   accounts: AccountProfile[];
   busy: boolean;
@@ -131,10 +167,14 @@ export default function AccountsPage({
   onAdd: () => void;
   onSwitch: (acc: AccountProfile) => void;
   onRename: (acc: AccountProfile, label: string) => void;
+  onMove: (acc: AccountProfile, direction: "up" | "down") => void;
+  onRemove: (acc: AccountProfile) => void;
 }) {
   const [view, setView] = useState<QuotaView>("both");
+  const [removing, setRemoving] = useState<AccountProfile | null>(null);
   const active = accounts.find((a) => a.isActive);
-  const withData = accounts.filter((a) => a.usage.fiveHour || a.usage.sevenDay);
+  const withData = accounts.filter(hasData);
+  const emptiest = emptiestUuid(accounts);
   const limited = accounts.filter((a) => fuller(a) >= 100 || a.usage.rateLimitNotice).length;
   const avgLeft = withData.length
     ? Math.round(withData.reduce((s, a) => s + Math.max(0, 100 - fuller(a)), 0) / withData.length)
@@ -196,17 +236,33 @@ export default function AccountsPage({
             Henüz hesap yok. Claude Desktop'ta giriş yaptığın hesap burada otomatik görünür.
           </Card>
         )}
-        {accounts.map((acc) => (
+        {accounts.map((acc, i) => (
           <AccountRow
             key={acc.accountUuid}
             acc={acc}
+            emptiest={acc.accountUuid === emptiest}
             view={view}
             busy={busy}
             onSwitch={() => onSwitch(acc)}
             onRename={(l) => onRename(acc, l)}
+            first={i === 0}
+            last={i === accounts.length - 1}
+            onMove={(d) => onMove(acc, d)}
+            onRemove={() => setRemoving(acc)}
           />
         ))}
       </section>
+
+      {removing && (
+        <RemoveAccountDialog
+          name={accountName(removing).name}
+          onCancel={() => setRemoving(null)}
+          onConfirm={() => {
+            setRemoving(null);
+            onRemove(removing);
+          }}
+        />
+      )}
     </div>
   );
 }

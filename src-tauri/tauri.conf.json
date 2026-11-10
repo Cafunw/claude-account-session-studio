@@ -27,6 +27,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis"],
     "icon": [
       "icons/icon.ico",
@@ -37,6 +38,13 @@
         "installMode": "currentUser",
         "languages": ["Turkish", "English"]
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJDMDc4RTM3MTYyRDFGMjMKUldRakh5MFdONDRIdkZuczg0V3plWWc5N2ZTK2NtMzVjTHg3eTh1dDBJUHNVWDlRY2RBZS9JY28K",
+      "endpoints": ["https://github.com/Cafunw/claude-account-session-studio/releases/latest/download/latest.json"],
+      "windows": { "installMode": "passive" }
     }
   }
 }

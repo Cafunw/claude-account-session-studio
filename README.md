@@ -13,6 +13,7 @@ Claude Desktop'ta birden fazla Claude hesabı kullananlar için Windows uygulama
 - **Tepsi:** Pencere kapanınca tepside çalışmaya devam eder; simge kotanın doluluğunu gösterir.
 - **Yedekler:** Elle ya da otomatik SHA-256 doğrulamalı yedek alır; bir yedekten yalnızca eksik sohbetleri geri yükler.
 - **Sağlık kontrolü:** Bozuk sohbet kayıtlarını ve doğrulaması tutmayan yedekleri salt okunur olarak listeler.
+- **Otomatik güncelleme:** Yeni sürümü GitHub Releases'tan denetler, imzasını doğrular ve kurar; Ayarlar'dan kapatılabilir ya da elle denetlenebilir.
 - Açık/koyu tema, Türkçe arayüz, Ayarlar sayfası.
 
 ## Sohbetler nasıl güvende kalır
@@ -64,7 +65,7 @@ npx tsc --noEmit -p . && npm run build
 - Bu proje **resmi değildir**; Anthropic ile bağlantılı değildir, Anthropic tarafından onaylanmamış ya da desteklenmemektedir. "Claude" Anthropic'in markasıdır.
 - Claude Desktop'un **belgelenmemiş yerel dosyalarına** ve Claude Code'un **OAuth kullanım uç noktasına** dayanır. Bunlar her an haber verilmeden değişebilir ve uygulama çalışmaz hale gelebilir.
 - Kimlik bilgileri bilgisayarında kalır ve Windows DPAPI ile şifrelenir (yalnızca senin Windows kullanıcın çözebilir).
-- Uygulama Anthropic'in kendi uç noktaları (`api.anthropic.com`, `platform.claude.com`) dışında hiçbir yere veri göndermez; telemetri yoktur.
+- Uygulama Anthropic'in kendi uç noktaları (`api.anthropic.com`, `platform.claude.com`) dışında yalnızca güncelleme denetimi için GitHub'a (`github.com`) bağlanır; bu Ayarlar'dan kapatılabilir. Başka hiçbir yere veri göndermez; telemetri yoktur.
 - **Kullanım riski sana aittir.** Yazılım "olduğu gibi" sunulur (bkz. [LICENSE](LICENSE)).
 
 ---
@@ -76,8 +77,9 @@ npx tsc --noEmit -p . && npm run build
 - One-click account switching: closes Claude Desktop, saves the current account's login files and Claude Code CLI credentials, restores the target account's, and relaunches Desktop. Also available from the tray.
 - Copies Code-tab chat pointers between accounts (additions only), either everything or only approved chats, with a prompt at switch time.
 - Shows 5-hour and weekly quota from Claude Desktop's local record or Claude Code's OAuth usage endpoint, and notifies once near the limit. It never switches accounts on its own.
+- Updates itself from GitHub Releases (signed); can be turned off in Settings.
 - Verified SHA-256 backups, a restore that only adds missing files, a format guard that stops all writes if Desktop's file layout changes, and a read-only health check.
 
 **Build:** `npm install`, then `npx tauri build`. **Dev preview with mock data:** `npm run dev`. Requires Windows 10/11 and Claude Desktop.
 
-**Disclaimer:** Not affiliated with or endorsed by Anthropic. It relies on Claude Desktop's undocumented local files and on Claude Code's OAuth usage endpoint, both of which can change at any time. Credentials stay on your machine, encrypted with Windows DPAPI. Nothing is sent anywhere except Anthropic's own endpoints. Use at your own risk. MIT licensed.
+**Disclaimer:** Not affiliated with or endorsed by Anthropic. It relies on Claude Desktop's undocumented local files and on Claude Code's OAuth usage endpoint, both of which can change at any time. Credentials stay on your machine, encrypted with Windows DPAPI. Besides Anthropic's own endpoints it only contacts GitHub to check for updates, which can be turned off in Settings. Use at your own risk. MIT licensed.

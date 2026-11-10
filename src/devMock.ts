@@ -2,7 +2,7 @@
 // main.tsx imports this behind `import.meta.env.DEV`, so it never reaches the production bundle.
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
-import { AccountProfile, EnvironmentReport, FullDashboardPayload, HealthReport, PendingChat, SessionRecord } from "./types";
+import { AccountProfile, EnvironmentReport, FullDashboardPayload, HealthReport, PendingChat, SessionRecord, UsageHistory } from "./types";
 
 const now = Date.now();
 const iso = (msFromNow: number) => new Date(now + msFromNow).toISOString();
@@ -68,14 +68,18 @@ const state: FullDashboardPayload = {
     autoSyncEnabled: true,
     autoSwitchEnabled: false,
     switchThresholdPercent: 90,
+    notifyOnReset: true,
     pollIntervalSeconds: 60,
     syncSidebarGroups: true,
     confirmBeforeDesktopRestart: false,
     transferMode: "ask",
+    autoUpdate: true,
     selectedChats: ["cli-mock-9"],
     selectedGroups: ["grp-1"],
     selectedFolders: ["c:\\projeler\\api-servisi"],
     selectedTargets: { "group:grp-1": [U2] },
+    hiddenAccounts: [],
+    accountOrder: [],
   },
   accounts: [
     account({
@@ -158,6 +162,27 @@ const pending: PendingChat[] = [
 
 const snap = () => structuredClone(state);
 
+// 14 days of hourly-ish samples: a weekly sawtooth that resets once, a 5-hour wave; U3 has none.
+function history(uuid: string, days: number): UsageHistory {
+  if (uuid === U3) return { samples: [], resets: [], forecast: "Tahmin için yeterli veri yok" };
+  const pro = uuid === U2;
+  const reset = now - (pro ? 5.9 : 3.8) * 24 * H;
+  const week = 7 * 24 * H;
+  const start = now - 14 * 24 * H;
+  const samples = [];
+  for (let t = start; t <= now; t += 1.5 * H) {
+    const since = ((((t - reset) % week) + week) % week) / (24 * H);
+    const sd = Math.min(100, since * (pro ? 15.5 : 14.5) * (t < reset ? 0.9 : 1) + 2 * Math.sin(t / (5 * H)));
+    const fh = pro ? null : Math.max(0, 40 * Math.sin((t / (5 * H)) % Math.PI));
+    samples.push({ t, accountUuid: uuid, sd: Math.max(0, sd), fh, src: "oauth-api" });
+  }
+  return {
+    samples: samples.filter((s) => s.t >= now - days * 24 * H),
+    resets: [reset, reset - week].filter((r) => r > start && r >= now - days * 24 * H),
+    forecast: pro ? "Bu hızla cuma 14:00 civarı dolar" : "Bu hızla sıfırlanmadan önce dolmaz",
+  };
+}
+
 export function installDevMock() {
   mockIPC(
     async (cmd, args: any) => {
@@ -166,6 +191,9 @@ export function installDevMock() {
         case "one_click_start_new_account_login":
           if (cmd !== "get_dashboard_state") await sleep(900);
           return snap();
+        case "get_usage_history":
+          await sleep(150);
+          return history(args.accountUuid, args.days);
         case "refresh_all_usage":
           await sleep(700);
           return { dashboard: snap(), notes: ["Örnek: 1 hesap için Claude Desktop kaydı kullanıldı."] };
@@ -175,8 +203,20 @@ export function installDevMock() {
           return state.automation.transferMode === "ask" && args.targetAccountUuid === U2
             ? { ask: true, pending }
             : { ask: false, pending: [] };
+        case "check_for_update":
+          await sleep(700);
+          return { available: true, version: "1.1.0", notes: "Örnek sürüm notu.", currentVersion: "1.0.0" };
+        case "install_update":
+          await sleep(1200);
+          throw "Önizlemede güncelleme kurulamaz.";
+        case "set_auto_update":
+          state.automation.autoUpdate = args.enabled;
+          return snap();
         case "update_preferences":
           state.automation.switchThresholdPercent = args.quotaAlertPercent;
+          return snap();
+        case "set_notify_on_reset":
+          state.automation.notifyOnReset = args.enabled;
           return snap();
         case "one_click_switch_account":
           console.info("[devMock] switch", args.targetAccountUuid, "extraChats", args.extraChats);
@@ -186,6 +226,24 @@ export function installDevMock() {
         case "rename_account": {
           const a = state.accounts.find((x) => x.accountUuid === args.accountUuid);
           if (a) a.customLabel = args.label.trim() || null;
+          return snap();
+        }
+        case "move_account": {
+          const i = state.accounts.findIndex((x) => x.accountUuid === args.accountUuid);
+          const j = args.direction === "up" ? i - 1 : i + 1;
+          if (i >= 0 && j >= 0 && j < state.accounts.length) {
+            [state.accounts[i], state.accounts[j]] = [state.accounts[j], state.accounts[i]];
+            state.automation.accountOrder = state.accounts.map((x) => x.accountUuid);
+          }
+          return snap();
+        }
+        case "remove_account": {
+          const a = state.accounts.find((x) => x.accountUuid === args.accountUuid);
+          if (!a) throw "Hesap bulunamadı.";
+          if (a.isActive) throw "Bu hesapla şu an Claude Desktop'ta giriş yapılmış; kaldırmak için önce başka bir hesaba geç.";
+          state.accounts = state.accounts.filter((x) => x !== a);
+          state.automation.hiddenAccounts.push(a.accountUuid);
+          await sleep(300);
           return snap();
         }
         case "set_sync_selection":
@@ -208,6 +266,28 @@ export function installDevMock() {
         case "run_health_check":
           await sleep(900);
           return health;
+        case "search_chats": {
+          await sleep(500);
+          const q = String(args.query).toLowerCase();
+          return state.sessions
+            .slice(0, 4)
+            .map((c) => ({
+              cliSessionId: c.cliSessionId,
+              title: c.title,
+              accountUuid: c.accountUuid,
+              snippet: `…bunu konuşmuştuk, ${q} konusunda önce örnek bir yapı kurup sonra ayrıntılara geçelim…`,
+              matchedRole: c.createdAt % 2 ? "user" : "assistant",
+              lastActivityAt: c.lastActivityAt,
+            }));
+        }
+        case "export_chat_markdown": {
+          await sleep(300);
+          const c = state.sessions.find((x) => x.cliSessionId === args.cliSessionId);
+          return `C:\\Users\\ornek\\Downloads\\Claude Sohbetleri\\${c?.title ?? "Sohbet"} (2025-01-15).md`;
+        }
+        case "reveal_in_explorer":
+          console.info("[devMock] reveal", args.path);
+          return null;
         default:
           console.warn("[devMock] unhandled command", cmd, args);
           return null;
@@ -217,4 +297,6 @@ export function installDevMock() {
   );
   // Open the preview with ?secim to see the tray's "switch-choice-needed" flow.
   if (location.search.includes("secim")) setTimeout(() => emit("switch-choice-needed", { targetAccountUuid: U2 }), 800);
+  // The background check's banner; the real app sends it at most once per version.
+  setTimeout(() => emit("update-available", { version: "1.1.0" }), 1200);
 }

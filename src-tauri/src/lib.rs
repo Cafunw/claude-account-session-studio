@@ -7,8 +7,10 @@
 //! 4. Restores the target account's Electron auth & CLI credentials.
 //! 5. Relaunches Claude Desktop (`explorer.exe shell:AppsFolder\Claude_...!Claude`).
 
+pub mod account_admin;
 pub mod accounts;
 pub mod background;
+pub mod chat_text;
 pub mod backup;
 pub mod desktop_switch;
 pub mod dpapi;
@@ -19,6 +21,8 @@ pub mod paths;
 pub mod quota_alert;
 pub mod sync_engine;
 pub mod tray;
+pub mod updater;
+pub mod usage_history;
 
 use accounts::{
     discover_accounts_in_root, fetch_live_oauth_usage, token_refresh_allowed, load_studio_config,
@@ -110,6 +114,8 @@ fn build_dashboard_state_ex(state: &AppState, force: bool, failed: &mut Vec<Stri
         &state.studio_dir,
         &cfg.accounts,
     );
+    account_admin::unhide_signed_in(state, &mut cfg, &accounts);
+    account_admin::apply_order(&mut accounts, &cfg.automation.account_order);
 
     // Keep live usage fresh (every 5 min). The CLI's own account is never refreshed (rotating its
     // refresh token would log the CLI out); it keeps that token fresh itself and we mirror it.
@@ -142,6 +148,8 @@ fn build_dashboard_state_ex(state: &AppState, force: bool, failed: &mut Vec<Stri
             let _ = save_studio_config(&state.studio_dir, &guard);
         }
     }
+
+    usage_history::record(&state.studio_dir, &accounts, chrono::Utc::now().timestamp_millis());
 
     // After a sync every account holds its own pointer to the same chat; list each chat once
     // (the active account's copy), otherwise the list and count double with every account.
@@ -206,6 +214,26 @@ fn get_dashboard_state(app: AppHandle, state: State<'_, AppState>) -> Result<Ful
     let dash = build_dashboard_state(&state);
     tray::refresh(&app, &dash.accounts);
     Ok(dash)
+}
+
+/// Read-only: the account's quota samples for the last `days` days plus the weekly forecast.
+#[tauri::command(async)]
+fn get_usage_history(state: State<'_, AppState>, account_uuid: String, days: u32) -> Result<usage_history::UsageHistory, String> {
+    let acc = state
+        .config
+        .lock()
+        .unwrap()
+        .accounts
+        .iter()
+        .find(|a| a.account_uuid.eq_ignore_ascii_case(&account_uuid))
+        .cloned()
+        .ok_or("Hesap bulunamadı")?;
+    let data_root = discover_real_roots()
+        .first()
+        .map(|r| PathBuf::from(&r.path))
+        .unwrap_or_else(|| state.studio_dir.join("fallback-data"));
+    let now = chrono::Local::now();
+    Ok(usage_history::history_for(&state.studio_dir, &data_root, &acc, days, now.timestamp_millis(), now.offset()))
 }
 
 #[derive(serde::Serialize)]
@@ -519,6 +547,17 @@ fn update_preferences(quota_alert_percent: f64, state: State<'_, AppState>) -> R
     Ok(build_dashboard_state(&state))
 }
 
+/// Turns the "limit reset" notification on or off.
+#[tauri::command(async)]
+fn set_notify_on_reset(enabled: bool, state: State<'_, AppState>) -> Result<FullDashboardPayload, String> {
+    {
+        let mut cfg = state.config.lock().unwrap();
+        cfg.automation.notify_on_reset = enabled;
+        save_studio_config(&state.studio_dir, &cfg)?;
+    }
+    Ok(build_dashboard_state(&state))
+}
+
 /// Gives an account a user-chosen name; an empty name resets it.
 #[tauri::command(async)]
 fn rename_account(
@@ -748,6 +787,7 @@ pub fn run() {
         ))
         .manage(app_state)
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -763,18 +803,29 @@ pub fn run() {
             spawn_account_watcher(app.handle().clone());
             quota_alert::spawn(app.handle().clone());
             format_guard::spawn_alert(app.handle().clone());
+            updater::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_dashboard_state,
+            get_usage_history,
             refresh_all_usage,
             run_health_check,
+            chat_text::search_chats,
+            chat_text::export_chat_markdown,
+            chat_text::reveal_in_explorer,
             one_click_switch_account,
             one_click_start_new_account_login,
             rename_account,
+            account_admin::remove_account,
+            account_admin::move_account,
             set_sync_selection,
             get_switch_plan,
             update_preferences,
+            updater::check_for_update,
+            updater::install_update,
+            updater::set_auto_update,
+            set_notify_on_reset,
             create_manual_backup,
             execute_safe_restore,
         ])

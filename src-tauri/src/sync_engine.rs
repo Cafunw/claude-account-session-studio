@@ -133,7 +133,8 @@ pub fn pending_for_target(
     if !accounts.iter().any(|a| a.account_uuid.eq_ignore_ascii_case(target) && !a.org_uuid.is_empty()) {
         return Vec::new();
     }
-    let sessions = scan_all_sessions(data_root, projects_dir, accounts);
+    let mut sessions = scan_all_sessions(data_root, projects_dir, accounts);
+    retain_listed(&mut sessions, accounts);
     let approved = approved_targets(data_root, &sessions, sel);
     let target_lc = target.to_lowercase();
     let mut listed: HashSet<&str> = HashSet::new();
@@ -295,6 +296,11 @@ pub fn index_available_cli_transcripts(projects_dir: &Path) -> HashSet<String> {
         }
     }
     set
+}
+
+/// Drops chats of account folders not in `accounts` (hidden accounts): they are no sync source.
+fn retain_listed(sessions: &mut Vec<SessionRecord>, accounts: &[AccountProfile]) {
+    sessions.retain(|s| accounts.iter().any(|a| a.account_uuid.eq_ignore_ascii_case(&s.account_uuid)));
 }
 
 /// Scan all `local_*.json` session pointers across all accounts in `data_root`.
@@ -654,7 +660,8 @@ pub fn preview_sync(
     mode: &str,
     selection: Option<&SyncSelection>,
 ) -> SyncPreviewReport {
-    let all_sessions = scan_all_sessions(data_root, projects_dir, accounts);
+    let mut all_sessions = scan_all_sessions(data_root, projects_dir, accounts);
+    retain_listed(&mut all_sessions, accounts);
 
     // "ask" mode: unapproved chats and non-target accounts get no NEW copy; a chat an account already has
     // keeps its refresh/companion there either way. Nothing is ever removed.

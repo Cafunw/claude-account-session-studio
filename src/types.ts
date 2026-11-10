@@ -67,16 +67,23 @@ export interface AutomationSettings {
   autoSyncEnabled: boolean;
   autoSwitchEnabled: boolean;
   switchThresholdPercent: number;
+  notifyOnReset: boolean;
   pollIntervalSeconds: number;
   syncSidebarGroups: boolean;
   confirmBeforeDesktopRestart: boolean;
   /** "ask": only approved chats are copied, the rest are asked about at switch time; "all": everything, never ask. */
   transferMode: "ask" | "all";
+  /** Background update check (GitHub Releases) and install at startup. */
+  autoUpdate: boolean;
   selectedChats: string[];
   selectedGroups: string[];
   selectedFolders: string[];
   /** `chat:<cli>` | `group:<id>` | `folder:<path>` -> account uuids that should have it; missing = all. */
   selectedTargets: Record<string, string[]>;
+  /** Accounts removed from the app; they come back when signed into Claude Desktop again. */
+  hiddenAccounts: string[];
+  /** User-chosen account order (uuids); the dashboard's `accounts` already follow it. */
+  accountOrder: string[];
 }
 
 export interface SidebarGroup {
@@ -165,4 +172,34 @@ export interface PendingChat {
 export interface SwitchPlan {
   ask: boolean;
   pending: PendingChat[];
+}
+
+export interface UpdateInfo {
+  available: boolean;
+  version: string | null;
+  notes: string | null;
+  currentVersion: string;
+}
+
+export interface UsageSample {
+  t: number;
+  accountUuid: string;
+  fh: number | null;
+  sd: number | null;
+  src: string;
+}
+
+export interface UsageHistory {
+  samples: UsageSample[];
+  resets: number[];
+  forecast: string;
+}
+
+export interface SearchHit {
+  cliSessionId: string;
+  title: string;
+  accountUuid: string;
+  snippet: string;
+  matchedRole: "user" | "assistant";
+  lastActivityAt: number;
 }
