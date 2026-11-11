@@ -178,9 +178,9 @@ fn day_of(ms: i64) -> String {
 }
 
 /// Creates a new file in `dir`; an existing name gets " (2)", " (3)"... so nothing is overwritten.
-fn create_unique(dir: &Path, stem: &str) -> Result<(File, PathBuf), String> {
+pub(crate) fn create_unique(dir: &Path, stem: &str, ext: &str) -> Result<(File, PathBuf), String> {
     for n in 1u32.. {
-        let name = if n == 1 { format!("{stem}.md") } else { format!("{stem} ({n}).md") };
+        let name = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem} ({n}).{ext}") };
         let path = dir.join(name);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(f) => return Ok((f, path)),
@@ -191,7 +191,7 @@ fn create_unique(dir: &Path, stem: &str) -> Result<(File, PathBuf), String> {
     unreachable!()
 }
 
-fn write_failed(e: std::io::Error) -> String {
+pub(crate) fn write_failed(e: std::io::Error) -> String {
     i18n::t(format!("Dosya yazılamadı: {e}"), format!("Couldn't write the file: {e}"))
 }
 
@@ -214,17 +214,28 @@ fn export_markdown(transcript: &Path, session: &SessionRecord, dir: &Path) -> Re
         true
     })?;
     fs::create_dir_all(dir).map_err(|e| i18n::t(format!("Klasör oluşturulamadı: {e}"), format!("Couldn't create the folder: {e}")))?;
-    let (mut file, path) = create_unique(dir, &format!("{} ({day})", safe_file_stem(&session.title)))?;
+    let (mut file, path) = create_unique(dir, &format!("{} ({day})", safe_file_stem(&session.title)), "md")?;
     file.write_all(md.as_bytes()).map_err(write_failed)?;
     Ok(path)
 }
 
+pub(crate) fn downloads_dir() -> PathBuf {
+    std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\Users\\Default")).join("Downloads")
+}
+
 fn export_dir() -> PathBuf {
-    std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("C:\\Users\\Default"))
-        .join("Downloads")
-        .join("Claude Sohbetleri") // fixed name: `reveal_in_explorer` only opens files inside it
+    downloads_dir().join("Claude Sohbetleri") // fixed name: `reveal_in_explorer` only opens files inside it
+}
+
+/// What `reveal_in_explorer` may open: a file inside `exports`, or a spending CSV the app saved
+/// directly in `downloads` (`claude-harcama-*.csv`).
+fn reveal_target(path: &Path, exports: &Path, downloads: &Path) -> Result<PathBuf, String> {
+    inside_dir(path, exports).or_else(|e| {
+        let canon = inside_dir(path, downloads).map_err(|_| e.clone())?;
+        let name = canon.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let direct = canon.parent().zip(downloads.canonicalize().ok()).is_some_and(|(a, b)| a == b);
+        if direct && name.starts_with("claude-harcama-") && name.ends_with(".csv") { Ok(canon) } else { Err(e) }
+    })
 }
 
 /// Canonical path of `path` if it is inside `dir`, else an error.
@@ -283,7 +294,7 @@ pub fn export_chat_markdown(cli_session_id: String, state: State<'_, AppState>) 
 
 #[tauri::command(async)]
 pub fn reveal_in_explorer(path: String) -> Result<(), String> {
-    let canon = inside_dir(Path::new(&path), &export_dir())?;
+    let canon = reveal_target(Path::new(&path), &export_dir(), &downloads_dir())?;
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -466,5 +477,18 @@ mod tests {
         // `..` that climbs out is resolved before the check.
         assert!(inside_dir(&dir.join("..").join("b.md"), &dir).is_err());
         assert!(inside_dir(&dir.join("yok.md"), &dir).is_err());
+
+        // A spending CSV saved directly in Downloads may be shown; nothing else there may.
+        let downloads = tmp.path();
+        let csv = downloads.join("claude-harcama-7-gun-2026-11-11.csv");
+        fs::write(&csv, "x").unwrap();
+        fs::create_dir_all(downloads.join("sub")).unwrap();
+        let nested = downloads.join("sub").join("claude-harcama-x.csv");
+        fs::write(&nested, "x").unwrap();
+        assert!(reveal_target(&inside, &dir, downloads).is_ok());
+        assert!(reveal_target(&csv, &dir, downloads).is_ok());
+        assert!(reveal_target(&outside, &dir, downloads).is_err());
+        assert!(reveal_target(&nested, &dir, downloads).is_err());
+        assert!(reveal_target(&tmp.path().join("..").join("claude-harcama-y.csv"), &dir, downloads).is_err());
     }
 }

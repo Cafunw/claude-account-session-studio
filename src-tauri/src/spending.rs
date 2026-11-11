@@ -11,7 +11,8 @@ use crate::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use chrono::{NaiveDate, TimeZone, Timelike};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -24,15 +25,12 @@ const DAY_MS: i64 = 86_400_000;
 /// Cache granularity. The window start is rounded down to a slot (at most 10 extra minutes).
 const SLOT_MS: i64 = 600_000;
 const MAX_FILE_BYTES: u64 = 300 * 1024 * 1024;
-/// Largest window; records of files untouched for longer are pruned.
-const MAX_DAYS: u32 = 90;
-const TOP: usize = 15;
 const UNTITLED: &str = "Adsız sohbet";
 const UNTITLED_EN: &str = "Untitled chat";
 const CACHE_FILE: &str = "spending-cache.json";
 const CACHE_VERSION: u32 = 1;
 const WARMUP_DELAY: Duration = Duration::from_secs(60);
-const WARMUP_DAYS: u32 = 30;
+const WARMUP_DAYS: i64 = 30;
 const ID_MASK: u64 = (1 << 48) - 1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -59,12 +57,98 @@ impl TokenSums {
     }
 }
 
+/// API list prices in USD per million tokens: input, output, cache write, cache read.
+/// Source: the claude-api skill's model table (cached 2026-11-03). Cache writes are the 5-minute
+/// TTL rate (1.25x input; the 1-hour rate is 2x, which transcripts do not tell apart here); cache
+/// reads are the per-model rate the skill lists, else 0.1x input. Haiku 5.5 uses its rate for prompts
+/// up to 100K tokens. Models the skill gives no price for (4.5 and older, non-Claude) are unpriced.
+pub const PRICES_AS_OF: &str = "2026-11-03";
+const PRICES: &[(&str, [f64; 4])] = &[
+    ("claude-fable-5-2", [8.0, 40.0, 10.0, 0.20]),
+    ("claude-mythos-5-2", [8.0, 40.0, 10.0, 0.20]),
+    ("claude-fable-5-1", [10.0, 50.0, 12.5, 0.25]),
+    ("claude-mythos-5-1", [10.0, 50.0, 12.5, 0.25]),
+    ("claude-fable-5", [10.0, 50.0, 12.5, 1.0]),
+    ("claude-mythos-5", [10.0, 50.0, 12.5, 1.0]),
+    ("claude-opus-5-5", [4.0, 20.0, 5.0, 0.20]),
+    ("claude-opus-5", [5.0, 25.0, 6.25, 0.50]),
+    ("claude-opus-4-8", [5.0, 25.0, 6.25, 0.50]),
+    ("claude-opus-4-7", [5.0, 25.0, 6.25, 0.50]),
+    ("claude-opus-4-6", [5.0, 25.0, 6.25, 0.50]),
+    ("claude-sonnet-5-5", [2.0, 10.0, 2.5, 0.10]),
+    ("claude-sonnet-5", [2.0, 10.0, 2.5, 0.20]),
+    ("claude-sonnet-4-6", [3.0, 15.0, 3.75, 0.30]),
+    ("claude-haiku-5-5", [0.10, 0.50, 0.125, 0.01]),
+    ("claude-haiku-4-5", [1.0, 5.0, 1.25, 0.10]),
+];
+
+/// Price of a model id: the table id itself, or it followed by a date (`-20260101`), `@...` or `[1m]`.
+fn price(model: &str) -> Option<[f64; 4]> {
+    PRICES
+        .iter()
+        .find(|(id, _)| {
+            model.strip_prefix(id).is_some_and(|rest| {
+                rest.is_empty()
+                    || rest.starts_with(['[', '@'])
+                    || rest.strip_prefix('-').is_some_and(|d| d.len() >= 8 && d.bytes().take(8).all(|b| b.is_ascii_digit()))
+            })
+        })
+        .map(|(_, p)| *p)
+}
+
+fn cost(t: &TokenSums, p: [f64; 4]) -> Cost {
+    let f = |n: u64, per_m: f64| n as f64 * per_m / 1e6;
+    let (input, output, cache_write, cache_read) = (f(t.input, p[0]), f(t.output, p[1]), f(t.cache_write, p[2]), f(t.cache_read, p[3]));
+    Cost { input, output, cache_write, cache_read, total: input + output + cache_write + cache_read }
+}
+
+/// Model family for the chart: fable, mythos, opus, sonnet, haiku or other.
+fn family(model: &str) -> &'static str {
+    ["fable", "mythos", "opus", "sonnet", "haiku"].into_iter().find(|f| model.contains(f)).unwrap_or("other")
+}
+
+/// USD at API list prices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cost {
+    pub input: f64,
+    pub output: f64,
+    pub cache_write: f64,
+    pub cache_read: f64,
+    pub total: f64,
+}
+
+impl Cost {
+    fn add(&mut self, o: &Cost) {
+        self.input += o.input;
+        self.output += o.output;
+        self.cache_write += o.cache_write;
+        self.cache_read += o.cache_read;
+        self.total += o.total;
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpendingTotals {
     pub tokens: TokenSums,
+    /// Of the priced models only.
+    pub cost: Cost,
     pub messages: u64,
     pub chats: u64,
+    /// Tokens of models with no list price, left out of `cost`.
+    pub unpriced: TokenSums,
+    /// The part that came from subagent transcripts.
+    pub subagent_tokens: TokenSums,
+    pub subagent_cost: f64,
+}
+
+/// The same span right before the window.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Previous {
+    pub tokens: TokenSums,
+    pub cost: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -72,6 +156,8 @@ pub struct SpendingTotals {
 pub struct ProjectSpend {
     pub cwd: String,
     pub tokens: TokenSums,
+    pub cost: f64,
+    pub messages: u64,
     pub chats: u64,
     pub last_activity_at: i64,
 }
@@ -83,6 +169,8 @@ pub struct ChatSpend {
     pub title: String,
     pub cwd: String,
     pub tokens: TokenSums,
+    pub cost: f64,
+    pub messages: u64,
     pub last_activity_at: i64,
 }
 
@@ -90,18 +178,66 @@ pub struct ChatSpend {
 #[serde(rename_all = "camelCase")]
 pub struct ModelSpend {
     pub model: String,
-    pub total: u64,
+    pub family: &'static str,
+    pub tokens: TokenSums,
+    /// None: no list price for this model.
+    pub cost: Option<f64>,
+    pub messages: u64,
+    pub last_activity_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Amount {
     pub work: u64,
+    pub cost: f64,
+}
+
+impl Amount {
+    fn add(&mut self, t: &TokenSums, usd: f64) {
+        self.work += t.work;
+        self.cost += usd;
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Day {
+    /// Local midnight (ms).
+    pub start: i64,
+    pub families: BTreeMap<&'static str, Amount>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriceRow {
+    pub model: &'static str,
+    pub input: f64,
+    pub output: f64,
+    pub cache_write: f64,
+    pub cache_read: f64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpendingReport {
-    pub days: u32,
+    /// "today" | "7" | "30" | "90" | "all"
+    pub range: String,
+    /// Local midnight of the window's first day (ms).
+    pub start: i64,
     pub totals: SpendingTotals,
+    /// None for all time.
+    pub previous: Option<Previous>,
+    /// All rows, most work first; the page shows the top ones.
     pub projects: Vec<ProjectSpend>,
     pub chats: Vec<ChatSpend>,
     pub models: Vec<ModelSpend>,
+    /// One per local day of the window, oldest first.
+    pub days: Vec<Day>,
+    /// By local hour of day, 0-23.
+    pub hours: Vec<Amount>,
+    pub prices: Vec<PriceRow>,
+    pub prices_as_of: &'static str,
     pub skipped_files: u64,
 }
 
@@ -356,6 +492,9 @@ struct FileInfo {
     path: PathBuf,
     /// A nested file (e.g. `<id>/subagents/agent-x.jsonl`) counts toward chat `<id>`.
     chat: String,
+    /// Subagent/workflow transcript: the file sits under a `subagents` folder. Its usage is still
+    /// attributed to the parent chat, the session folder that holds that `subagents` folder.
+    subagent: bool,
     mtime: i64,
     size: u64,
 }
@@ -364,23 +503,23 @@ struct FileInfo {
 fn walk(projects_dir: &Path) -> Vec<FileInfo> {
     let mut out = Vec::new();
     for proj in fs::read_dir(projects_dir).into_iter().flatten().flatten() {
-        walk_dir(&proj.path(), None, &mut out);
+        walk_dir(&proj.path(), None, false, &mut out);
     }
     out
 }
 
-fn walk_dir(dir: &Path, chat: Option<&str>, out: &mut Vec<FileInfo>) {
+fn walk_dir(dir: &Path, chat: Option<&str>, subagent: bool, out: &mut Vec<FileInfo>) {
     for e in fs::read_dir(dir).into_iter().flatten().flatten() {
         let (p, Ok(ft)) = (e.path(), e.file_type()) else { continue };
         let name = e.file_name();
         let Some(chat) = chat.or(name.to_str()) else { continue };
         if ft.is_dir() || (ft.is_symlink() && p.is_dir()) {
-            walk_dir(&p, Some(chat), out);
+            walk_dir(&p, Some(chat), subagent || name == "subagents", out);
         } else if p.extension().is_some_and(|x| x == "jsonl") {
             // DirEntry metadata comes with the directory listing on Windows: no extra open.
             let meta = if ft.is_symlink() { fs::metadata(&p) } else { e.metadata() };
             let Some((mtime, size)) = meta.ok().and_then(|m| Some((ms(m.modified().ok()?), m.len()))) else { continue };
-            out.push(FileInfo { chat: chat.trim_end_matches(".jsonl").to_string(), path: p, mtime, size });
+            out.push(FileInfo { chat: chat.trim_end_matches(".jsonl").to_string(), subagent, path: p, mtime, size });
         }
     }
 }
@@ -414,17 +553,15 @@ fn threads(low: bool) -> usize {
     if low { (n / 2).max(1) } else { n }
 }
 
-/// Prunes records of deleted or long-untouched files, then brings the records of the files changed
-/// in the last `days` up to date.
-fn refresh(store: &mut Store, projects_dir: &Path, days: u32, now: i64, max_bytes: u64, run: &Run) -> Scan {
+/// Prunes records of deleted files, then brings the records of the files changed since `start`
+/// (ms; `i64::MIN` for all) up to date.
+fn refresh(store: &mut Store, projects_dir: &Path, start: i64, max_bytes: u64, run: &Run) -> Scan {
     let files = walk(projects_dir);
-    let keep_from = now - MAX_DAYS as i64 * DAY_MS;
-    let live: HashSet<&Path> = files.iter().filter(|f| f.mtime >= keep_from).map(|f| f.path.as_path()).collect();
+    let live: HashSet<&Path> = files.iter().map(|f| f.path.as_path()).collect();
     let before = store.files.len();
     store.files.retain(|p, _| live.contains(p.as_path()));
     let mut dirty = store.files.len() != before;
 
-    let start = now - days as i64 * DAY_MS;
     let changed: Vec<&FileInfo> = files
         .iter()
         .filter(|f| f.mtime >= start && f.size <= max_bytes)
@@ -520,85 +657,240 @@ fn share(t: [u64; 4], keep: u64, of: u64) -> TokenSums {
 #[derive(Default)]
 struct Acc<'a> {
     tokens: TokenSums,
+    cost: f64,
+    messages: u64,
     last: i64,
     chats: HashSet<&'a str>,
     cwd: &'a str,
 }
 
-/// `known`: cli session id -> (title, cwd) from the app's session list.
-fn report(
-    store: &Store,
-    scan: &Scan,
-    known: &HashMap<String, (String, Option<String>)>,
-    days: u32,
-    now: i64,
-    max_bytes: u64,
-) -> SpendingReport {
-    let start = now - days as i64 * DAY_MS;
-    let (first, last) = (start.div_euclid(SLOT_MS), now.div_euclid(SLOT_MS));
-    let mut report = SpendingReport { days, ..Default::default() };
-    let mut seen = HashSet::new();
-    let (mut projects, mut chats, mut models) = (HashMap::<&str, Acc>::new(), HashMap::<&str, Acc>::new(), HashMap::<&str, (u64, u64)>::new());
+impl Acc<'_> {
+    fn add(&mut self, t: &TokenSums, usd: f64, n: u64, last: i64) {
+        self.tokens.add(t);
+        self.cost += usd;
+        self.messages += n;
+        self.last = self.last.max(last);
+    }
+}
 
-    for f in scan.files.iter().filter(|f| f.mtime >= start) {
-        if f.size > max_bytes || scan.failed.contains(&f.path) {
-            report.skipped_files += 1;
+fn local<Tz: TimeZone>(tz: &Tz, ms: i64) -> chrono::DateTime<Tz> {
+    tz.timestamp_millis_opt(ms).unwrap()
+}
+
+fn midnight<Tz: TimeZone>(tz: &Tz, d: NaiveDate) -> i64 {
+    let t = d.and_time(chrono::NaiveTime::MIN);
+    tz.from_local_datetime(&t).earliest().map_or_else(|| t.and_utc().timestamp_millis(), |x| x.timestamp_millis())
+}
+
+/// Window start (local midnight of its first day; `i64::MIN` for all time) and the shift back to the
+/// previous period of the same length (the same hours of the earlier days, so a partial today
+/// compares with the same part of yesterday).
+fn window<Tz: TimeZone>(range: &str, now: i64, tz: &Tz) -> (i64, Option<i64>) {
+    let days = match range {
+        "today" => 1,
+        "30" => 30,
+        "90" => 90,
+        "all" => return (i64::MIN, None),
+        _ => 7,
+    };
+    let today = local(tz, now).date_naive();
+    (midnight(tz, today - chrono::Days::new(days - 1)), Some(days as i64 * DAY_MS))
+}
+
+/// First byte time the scan must cover: the window and the previous period.
+fn scan_from<Tz: TimeZone>(range: &str, now: i64, tz: &Tz) -> i64 {
+    let (start, shift) = window(range, now, tz);
+    shift.map_or(i64::MIN, |s| start - s)
+}
+
+/// Calls `f` for every slot in [start, end] (ms) with its tokens after the cross-file dedupe, and
+/// returns how many files were skipped. A resumed chat repeats earlier messages: the first file in
+/// walk order keeps them; duplicates in a slot that also has new messages are removed by their
+/// average size.
+fn each_slot<'a>(store: &'a Store, scan: &'a Scan, max_bytes: u64, start: i64, end: i64, mut f: impl FnMut(&'a FileInfo, &'a Slot, TokenSums, u64)) -> u64 {
+    let (first, last) = (start.div_euclid(SLOT_MS), end.div_euclid(SLOT_MS));
+    let (mut seen, mut skipped) = (HashSet::new(), 0);
+    for fi in scan.files.iter().filter(|f| f.mtime >= start) {
+        if fi.size > max_bytes || scan.failed.contains(&fi.path) {
+            skipped += 1;
             continue;
         }
-        let Some(rec) = store.files.get(&f.path) else { continue };
-        let known_cwd = known.get(&f.chat).and_then(|(_, c)| c.as_deref());
+        let Some(rec) = store.files.get(&fi.path) else { continue };
         for s in rec.slots.iter().filter(|s| (first..=last).contains(&s.s)) {
-            // Cross-file dedupe (a resumed chat repeats earlier messages): the first file keeps them.
-            // Duplicates in a slot that also has new messages are removed by their average size.
             let dup = s.i.iter().filter(|id| !seen.insert(**id)).count() as u64;
             let n = s.n - dup;
-            if n == 0 {
-                continue;
-            }
-            let t = share(s.t, n, s.n);
-            let cwd = match known_cwd {
-                Some(k) if s.c.is_empty() => k,
-                _ => s.c.as_str(),
-            };
-            report.totals.tokens.add(&t);
-            report.totals.messages += n;
-            let m = models.entry(&s.m).or_default();
-            (m.0, m.1) = (m.0 + t.total, m.1 + t.work);
-            let p = projects.entry(cwd).or_default();
-            p.tokens.add(&t);
-            p.last = p.last.max(s.l);
-            p.chats.insert(&f.chat);
-            let c = chats.entry(&f.chat).or_default();
-            c.tokens.add(&t);
-            if s.l >= c.last {
-                c.last = s.l;
-                c.cwd = cwd;
+            if n > 0 {
+                f(fi, s, share(s.t, n, s.n), n);
             }
         }
     }
+    skipped
+}
 
-    report.totals.chats = chats.len() as u64;
-    report.projects = projects
+/// `known`: cli session id -> (title, cwd) from the app's session list; `tz` sets day and hour bounds.
+fn report<Tz: TimeZone>(
+    store: &Store,
+    scan: &Scan,
+    known: &HashMap<String, (String, Option<String>)>,
+    range: &str,
+    now: i64,
+    tz: &Tz,
+    max_bytes: u64,
+) -> SpendingReport {
+    let (mut start, shift) = window(range, now, tz);
+    if shift.is_none() {
+        let first = scan.files.iter().filter_map(|f| store.files.get(&f.path)).flat_map(|r| r.slots.iter().map(|s| s.s)).min();
+        start = midnight(tz, local(tz, first.map_or(now, |s| (s * SLOT_MS).min(now))).date_naive());
+    }
+    let first_day = local(tz, start).date_naive();
+    let n_days = (local(tz, now).date_naive() - first_day).num_days().max(0) as u64 + 1;
+    let mut r = SpendingReport {
+        range: match range {
+            "today" | "30" | "90" | "all" => range,
+            _ => "7",
+        }
+        .into(),
+        start,
+        days: (0..n_days).map(|i| Day { start: midnight(tz, first_day + chrono::Days::new(i)), ..Default::default() }).collect(),
+        hours: vec![Amount::default(); 24],
+        prices: PRICES.iter().map(|&(model, [input, output, cache_write, cache_read])| PriceRow { model, input, output, cache_write, cache_read }).collect(),
+        prices_as_of: PRICES_AS_OF,
+        ..Default::default()
+    };
+    let (mut projects, mut chats, mut models) = (HashMap::<&str, Acc>::new(), HashMap::<&str, Acc>::new(), HashMap::<&str, Acc>::new());
+    let mut prices = HashMap::<&str, Option<[f64; 4]>>::new();
+    let totals = &mut r.totals;
+    let (days, hours) = (&mut r.days, &mut r.hours);
+    r.skipped_files = each_slot(store, scan, max_bytes, start, now, |fi, s, t, n| {
+        let c = prices.entry(&s.m).or_insert_with(|| price(&s.m)).map(|p| cost(&t, p));
+        let usd = c.map_or(0.0, |c| c.total);
+        totals.tokens.add(&t);
+        totals.messages += n;
+        match c {
+            Some(c) => totals.cost.add(&c),
+            None => totals.unpriced.add(&t),
+        }
+        if fi.subagent {
+            totals.subagent_tokens.add(&t);
+            totals.subagent_cost += usd;
+        }
+        let cwd = match known.get(&fi.chat).and_then(|(_, c)| c.as_deref()) {
+            Some(k) if s.c.is_empty() => k,
+            _ => s.c.as_str(),
+        };
+        models.entry(&s.m).or_default().add(&t, usd, n, s.l);
+        let p = projects.entry(cwd).or_default();
+        p.add(&t, usd, n, s.l);
+        p.chats.insert(&fi.chat);
+        let c = chats.entry(&fi.chat).or_default();
+        let newer = s.l >= c.last;
+        c.add(&t, usd, n, s.l);
+        if newer {
+            c.cwd = cwd;
+        }
+        let at = local(tz, s.s * SLOT_MS);
+        if let Some(d) = days.get_mut((at.date_naive() - first_day).num_days() as usize) {
+            d.families.entry(family(&s.m)).or_default().add(&t, usd);
+        }
+        hours[at.hour() as usize].add(&t, usd);
+    });
+    if let Some(shift) = shift {
+        let mut prev = Previous::default();
+        each_slot(store, scan, max_bytes, start - shift, now - shift, |_, s, t, _| {
+            prev.tokens.add(&t);
+            prev.cost += price(&s.m).map_or(0.0, |p| cost(&t, p).total);
+        });
+        r.previous = Some(prev);
+    }
+
+    r.totals.chats = chats.len() as u64;
+    r.projects = projects
         .into_iter()
-        .map(|(cwd, a)| ProjectSpend { cwd: cwd.to_string(), tokens: a.tokens, chats: a.chats.len() as u64, last_activity_at: a.last })
+        .map(|(cwd, a)| ProjectSpend { cwd: cwd.to_string(), tokens: a.tokens, cost: a.cost, messages: a.messages, chats: a.chats.len() as u64, last_activity_at: a.last })
         .collect();
-    report.projects.sort_by(|a, b| b.tokens.work.cmp(&a.tokens.work).then_with(|| a.cwd.cmp(&b.cwd)));
-    report.projects.truncate(TOP);
-    report.chats = chats
+    r.projects.sort_by(|a, b| b.tokens.work.cmp(&a.tokens.work).then_with(|| a.cwd.cmp(&b.cwd)));
+    r.chats = chats
         .into_iter()
         .map(|(id, a)| {
             let (title, cwd) = match known.get(id) {
                 Some((t, c)) => (t.clone(), c.clone().unwrap_or_else(|| a.cwd.to_string())),
                 None => (crate::i18n::t(UNTITLED, UNTITLED_EN).to_string(), a.cwd.to_string()),
             };
-            ChatSpend { cli_session_id: id.to_string(), title, cwd, tokens: a.tokens, last_activity_at: a.last }
+            ChatSpend { cli_session_id: id.to_string(), title, cwd, tokens: a.tokens, cost: a.cost, messages: a.messages, last_activity_at: a.last }
         })
         .collect();
-    report.chats.sort_by(|a, b| b.tokens.work.cmp(&a.tokens.work).then_with(|| a.cli_session_id.cmp(&b.cli_session_id)));
-    report.chats.truncate(TOP);
-    report.models = models.into_iter().map(|(m, (total, work))| ModelSpend { model: m.to_string(), total, work }).collect();
-    report.models.sort_by(|a, b| b.work.cmp(&a.work).then_with(|| a.model.cmp(&b.model)));
-    report
+    r.chats.sort_by(|a, b| b.tokens.work.cmp(&a.tokens.work).then_with(|| a.cli_session_id.cmp(&b.cli_session_id)));
+    r.models = models
+        .into_iter()
+        .map(|(m, a)| ModelSpend {
+            model: m.to_string(),
+            family: family(m),
+            tokens: a.tokens,
+            cost: price(m).map(|_| a.cost),
+            messages: a.messages,
+            last_activity_at: a.last,
+        })
+        .collect();
+    r.models.sort_by(|a, b| b.tokens.work.cmp(&a.tokens.work).then_with(|| a.model.cmp(&b.model)));
+    r
+}
+
+fn range_label(range: &str) -> String {
+    match range {
+        "today" => "bugun".into(),
+        "all" => "tum-zamanlar".into(),
+        n => format!("{n}-gun"),
+    }
+}
+
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
+}
+
+/// Projects, chats and models of `r` as one CSV (UTF-8 with BOM so Excel reads Turkish letters).
+fn csv(r: &SpendingReport) -> String {
+    let t = crate::i18n::t;
+    let head = [
+        t("Bölüm", "Section"),
+        t("Ad", "Name"),
+        t("Klasör", "Folder"),
+        t("İşlenen token", "Tokens processed"),
+        t("Girdi", "Input"),
+        t("Çıktı", "Output"),
+        t("Önbelleğe yazma", "Cache write"),
+        t("Önbellekten okuma", "Cache read"),
+        t("API karşılığı (USD)", "API equivalent (USD)"),
+        t("Mesaj", "Messages"),
+        t("Son etkinlik", "Last activity"),
+    ];
+    let mut out = String::from("\u{feff}");
+    out += &head.join(",");
+    out.push('\n');
+    let mut row = |kind: &str, name: &str, folder: &str, tk: &TokenSums, usd: Option<f64>, messages: u64, last: i64| {
+        let when = chrono::DateTime::from_timestamp_millis(last).map(|d| d.to_rfc3339()).unwrap_or_default();
+        let usd = usd.map(|c| format!("{c:.4}")).unwrap_or_default();
+        let cells = [kind.to_string(), csv_field(name), csv_field(folder), tk.work.to_string(), tk.input.to_string(), tk.output.to_string(), tk.cache_write.to_string(), tk.cache_read.to_string(), usd, messages.to_string(), when];
+        out += &cells.join(",");
+        out.push('\n');
+    };
+    for p in &r.projects {
+        row(t("Proje", "Project"), &p.cwd, &p.cwd, &p.tokens, Some(p.cost), p.messages, p.last_activity_at);
+    }
+    for c in &r.chats {
+        row(t("Sohbet", "Chat"), &c.title, &c.cwd, &c.tokens, Some(c.cost), c.messages, c.last_activity_at);
+    }
+    for m in &r.models {
+        row("Model", &m.model, "", &m.tokens, m.cost, m.messages, m.last_activity_at);
+    }
+    out
+}
+
+/// Writes `csv(r)` to `dir` as `claude-harcama-<range>-<date>.csv`, never over an existing file.
+fn write_csv(r: &SpendingReport, dir: &Path, date: &str) -> Result<PathBuf, String> {
+    let stem = format!("claude-harcama-{}-{date}", range_label(&r.range));
+    let (mut file, path) = crate::chat_text::create_unique(dir, &stem, "csv")?;
+    std::io::Write::write_all(&mut file, csv(r).as_bytes()).map_err(crate::chat_text::write_failed)?;
+    Ok(path)
 }
 
 fn emit_progress(app: &AppHandle, done: usize, total: usize) {
@@ -606,21 +898,21 @@ fn emit_progress(app: &AppHandle, done: usize, total: usize) {
 }
 
 #[tauri::command(async)]
-pub fn get_spending(days: u32, app: AppHandle, state: State<'_, AppState>) -> SpendingReport {
+pub fn get_spending(range: String, app: AppHandle, state: State<'_, AppState>) -> SpendingReport {
     let (projects, sessions) = crate::chat_text::listed_chats(&state);
     let known = sessions
         .into_iter()
         .filter_map(|s| Some((s.cli_session_id?, (s.title, s.cwd.or(s.origin_cwd)))))
         .collect();
-    let days = days.clamp(1, MAX_DAYS);
     URGENT.store(true, Ordering::Relaxed);
     // A running warm-up holds the store: this waits for it and then only reads what is still missing.
     let mut store = store().lock().unwrap_or_else(|e| e.into_inner());
     load(&mut store, &state.studio_dir);
     let now = chrono::Utc::now().timestamp_millis();
     let progress = |d, t| emit_progress(&app, d, t);
-    let scan = refresh(&mut store, &projects, days, now, MAX_FILE_BYTES, &Run { threads: threads(false), low: false, pause: &|| {}, progress: &progress });
-    let r = report(&store, &scan, &known, days, now, MAX_FILE_BYTES);
+    let from = scan_from(&range, now, &chrono::Local);
+    let scan = refresh(&mut store, &projects, from, MAX_FILE_BYTES, &Run { threads: threads(false), low: false, pause: &|| {}, progress: &progress });
+    let r = report(&store, &scan, &known, &range, now, &chrono::Local, MAX_FILE_BYTES);
     if scan.dirty {
         // Off the request path; the next scan waits for it on the store lock.
         let dir = state.studio_dir.clone();
@@ -629,6 +921,14 @@ pub fn get_spending(days: u32, app: AppHandle, state: State<'_, AppState>) -> Sp
         });
     }
     r
+}
+
+/// Saves the report of `range` to the Downloads folder as CSV and returns the new file's path.
+#[tauri::command(async)]
+pub fn export_spending_csv(range: String, app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let r = get_spending(range, app, state);
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    Ok(write_csv(&r, &crate::chat_text::downloads_dir(), &date)?.to_string_lossy().into_owned())
 }
 
 /// One low-priority scan a minute after start, so the page opens with the data already read.
@@ -647,7 +947,7 @@ pub fn spawn_warmup(app: AppHandle) {
         load(&mut store, &state.studio_dir);
         let now = chrono::Utc::now().timestamp_millis();
         let run = Run { threads: threads(!URGENT.load(Ordering::Relaxed)), low: true, pause: &pause, progress: &progress };
-        if refresh(&mut store, &crate::chat_text::cli_projects_dir(), WARMUP_DAYS, now, MAX_FILE_BYTES, &run).dirty {
+        if refresh(&mut store, &crate::chat_text::cli_projects_dir(), now - WARMUP_DAYS * DAY_MS, MAX_FILE_BYTES, &run).dirty {
             let _ = save(&store, &state.studio_dir);
         }
     });
@@ -656,6 +956,7 @@ pub fn spawn_warmup(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{FixedOffset, Utc};
     use serde_json::json;
     use std::io::Write;
 
@@ -704,22 +1005,22 @@ mod tests {
         Run { threads, low: false, pause: &|| {}, progress: &|_, _| {} }
     }
 
-    fn scan_report(store: &mut Store, dir: &Path, known: &HashMap<String, (String, Option<String>)>, days: u32, max: u64, threads: usize) -> SpendingReport {
-        let scan = refresh(store, dir, days, now(), max, &quiet(threads));
-        report(store, &scan, known, days, now(), max)
+    fn scan_report(store: &mut Store, dir: &Path, known: &HashMap<String, (String, Option<String>)>, range: &str, max: u64, threads: usize) -> SpendingReport {
+        let scan = refresh(store, dir, scan_from(range, now(), &Utc), max, &quiet(threads));
+        report(store, &scan, known, range, now(), &Utc, max)
     }
 
-    fn run(dir: &Path, known: &HashMap<String, (String, Option<String>)>, days: u32, max: u64) -> SpendingReport {
-        scan_report(&mut Store::default(), dir, known, days, max, 4)
+    fn run(dir: &Path, known: &HashMap<String, (String, Option<String>)>, range: &str, max: u64) -> SpendingReport {
+        scan_report(&mut Store::default(), dir, known, range, max, 4)
     }
 
     fn total(store: &mut Store, dir: &Path) -> u64 {
-        scan_report(store, dir, &HashMap::new(), 7, MAX_FILE_BYTES, 2).totals.tokens.total
+        scan_report(store, dir, &HashMap::new(), "7", MAX_FILE_BYTES, 2).totals.tokens.total
     }
 
     /// The pre-cache algorithm: every line, exact dedupe by id in file order, exact window.
-    fn exact_total(dir: &Path, days: u32) -> u64 {
-        let start = now() - days as i64 * DAY_MS;
+    fn exact_total(dir: &Path, range: &str) -> u64 {
+        let start = window(range, now(), &Utc).0;
         let mut seen = HashSet::new();
         let mut sum = 0;
         for f in walk(dir) {
@@ -754,7 +1055,7 @@ mod tests {
 
         let known = HashMap::from([("c1".to_string(), ("Plan".to_string(), Some("C:\\a".to_string())))]);
         crate::i18n::set_test_lang(crate::i18n::Lang::Tr);
-        let r = run(tmp.path(), &known, 7, MAX_FILE_BYTES);
+        let r = run(tmp.path(), &known, "7", MAX_FILE_BYTES);
         assert_eq!(r.totals.tokens, TokenSums { input: 516, output: 26, cache_write: 31, cache_read: 48, total: 621, work: 573 });
         assert_eq!((r.totals.messages, r.totals.chats, r.skipped_files), (5, 3, 0));
 
@@ -765,12 +1066,12 @@ mod tests {
         assert_eq!(chats, [("c3", UNTITLED, 500, 500), ("c1", "Plan", 63, 104), ("c2", UNTITLED, 10, 17)]);
         assert_eq!(r.chats[0].cwd, "C:\\b");
 
-        let models: Vec<_> = r.models.iter().map(|m| (m.model.as_str(), m.work, m.total)).collect();
+        let models: Vec<_> = r.models.iter().map(|m| (m.model.as_str(), m.tokens.work, m.tokens.total)).collect();
         assert_eq!(models, [("sonnet", 503, 504), ("opus", 70, 110), ("haiku", 0, 7)]);
 
         // The 30-day window picks up the 10-day-old line too.
-        assert_eq!(run(tmp.path(), &known, 30, MAX_FILE_BYTES).totals.tokens.total, 1621);
-        assert_eq!(exact_total(tmp.path(), 7), 621);
+        assert_eq!(run(tmp.path(), &known, "30", MAX_FILE_BYTES).totals.tokens.total, 1621);
+        assert_eq!(exact_total(tmp.path(), "7"), 621);
     }
 
     #[test]
@@ -780,22 +1081,23 @@ mod tests {
         write(tmp.path(), "p1/long.jsonl", &[asst("l1", 1.0, "C:\\long", "opus", 1, 10, 0, 90_000), asst("l2", 1.0, "C:\\long", "opus", 1, 10, 0, 95_000)]);
         // A short chat that did real work.
         write(tmp.path(), "p2/busy.jsonl", &[asst("b1", 1.0, "C:\\busy", "sonnet", 200, 3_000, 5_000, 1_000)]);
-        let r = run(tmp.path(), &HashMap::new(), 7, MAX_FILE_BYTES);
+        let r = run(tmp.path(), &HashMap::new(), "7", MAX_FILE_BYTES);
         assert_eq!((r.totals.tokens.work, r.totals.tokens.cache_read, r.totals.tokens.total), (8_222, 186_000, 194_222));
         assert_eq!(r.projects.iter().map(|p| p.cwd.as_str()).collect::<Vec<_>>(), ["C:\\busy", "C:\\long"]);
         assert_eq!(r.chats.iter().map(|c| (c.cli_session_id.as_str(), c.tokens.work)).collect::<Vec<_>>(), [("busy", 8_200), ("long", 22)]);
-        assert_eq!(r.models.iter().map(|m| (m.model.as_str(), m.work, m.total)).collect::<Vec<_>>(), [("sonnet", 8_200, 9_200), ("opus", 22, 185_022)]);
+        assert_eq!(r.models.iter().map(|m| (m.model.as_str(), m.tokens.work, m.tokens.total)).collect::<Vec<_>>(), [("sonnet", 8_200, 9_200), ("opus", 22, 185_022)]);
     }
 
     #[test]
     fn old_files_are_not_read_and_big_files_are_counted_as_skipped() {
         let tmp = tempfile::tempdir().unwrap();
         let old = write(tmp.path(), "p/old.jsonl", &[asst("a", 1.0, "C:\\a", "opus", 9, 0, 0, 0)]);
-        let ten_days_before_now = SystemTime::UNIX_EPOCH + Duration::from_millis((now() - 10 * DAY_MS) as u64);
-        File::options().write(true).open(&old).unwrap().set_modified(ten_days_before_now).unwrap();
+        // Older than the 7-day window and the 7 days before it.
+        let long_ago = SystemTime::UNIX_EPOCH + Duration::from_millis((now() - 20 * DAY_MS) as u64);
+        File::options().write(true).open(&old).unwrap().set_modified(long_ago).unwrap();
         let big = write(tmp.path(), "p/big.jsonl", &[asst("b", 1.0, "C:\\a", "opus", 7, 0, 0, 0)]);
         let mut store = Store::default();
-        let r = scan_report(&mut store, tmp.path(), &HashMap::new(), 7, fs::metadata(&big).unwrap().len() - 1, 2);
+        let r = scan_report(&mut store, tmp.path(), &HashMap::new(), "7", fs::metadata(&big).unwrap().len() - 1, 2);
         assert_eq!((r.totals.tokens.total, r.skipped_files), (0, 1));
         assert!(r.projects.is_empty() && r.chats.is_empty() && r.models.is_empty());
         assert!(store.files.is_empty(), "neither file was read");
@@ -814,8 +1116,8 @@ mod tests {
         let mut no_cwd = asst("c", 0.5, "", "sonnet", 100, 0, 0, 0);
         no_cwd.as_object_mut().unwrap().remove("cwd");
         append(&path, &text(&[asst("a", 1.0, "C:\\a", "opus", 3, 4, 0, 0), asst("b", 1.0, "C:\\a", "opus", 10, 0, 0, 0), no_cwd]));
-        let inc = scan_report(&mut store, tmp.path(), &HashMap::new(), 7, MAX_FILE_BYTES, 2);
-        let full = run(tmp.path(), &HashMap::new(), 7, MAX_FILE_BYTES);
+        let inc = scan_report(&mut store, tmp.path(), &HashMap::new(), "7", MAX_FILE_BYTES, 2);
+        let full = run(tmp.path(), &HashMap::new(), "7", MAX_FILE_BYTES);
         assert_eq!(serde_json::to_value(&inc).unwrap(), serde_json::to_value(&full).unwrap());
         assert_eq!(inc.totals.tokens.total, 117);
         assert_eq!(inc.projects[0].cwd, "C:\\a", "the cwd carried over the read boundary");
@@ -825,7 +1127,7 @@ mod tests {
         fs::write(&path, &edited).unwrap();
         append(&path, &text(&[asst("d", 0.1, "C:\\a", "opus", 1, 0, 0, 0)]));
         assert_eq!(total(&mut store, tmp.path()), 118);
-        assert_eq!(run(tmp.path(), &HashMap::new(), 7, MAX_FILE_BYTES).totals.tokens.total, 124);
+        assert_eq!(run(tmp.path(), &HashMap::new(), "7", MAX_FILE_BYTES).totals.tokens.total, 124);
     }
 
     #[test]
@@ -865,20 +1167,20 @@ mod tests {
         write(&dir, "p/c1.jsonl", &[asst("a", 1.0, "C:\\a", "opus", 3, 4, 5, 6), asst("b", 2.0, "C:\\b", "sonnet", 1, 0, 0, 0)]);
         let gone = write(&dir, "p/c2.jsonl", &[asst("c", 1.0, "C:\\a", "opus", 9, 0, 0, 0)]);
         let mut store = Store::default();
-        let first = scan_report(&mut store, &dir, &HashMap::new(), 7, MAX_FILE_BYTES, 2);
+        let first = scan_report(&mut store, &dir, &HashMap::new(), "7", MAX_FILE_BYTES, 2);
         save(&store, &studio).unwrap();
 
         let mut again = Store::default();
         load(&mut again, &studio);
         assert_eq!(again.files, store.files);
-        let scan = refresh(&mut again, &dir, 7, now(), MAX_FILE_BYTES, &quiet(2));
+        let scan = refresh(&mut again, &dir, scan_from("7", now(), &Utc), MAX_FILE_BYTES, &quiet(2));
         assert!(!scan.dirty, "nothing was read after the restart");
-        let second = report(&again, &scan, &HashMap::new(), 7, now(), MAX_FILE_BYTES);
+        let second = report(&again, &scan, &HashMap::new(), "7", now(), &Utc, MAX_FILE_BYTES);
         assert_eq!(serde_json::to_value(&first).unwrap(), serde_json::to_value(&second).unwrap());
 
         // A deleted transcript's record is pruned.
         fs::remove_file(&gone).unwrap();
-        assert!(refresh(&mut again, &dir, 7, now(), MAX_FILE_BYTES, &quiet(2)).dirty);
+        assert!(refresh(&mut again, &dir, scan_from("7", now(), &Utc), MAX_FILE_BYTES, &quiet(2)).dirty);
         assert!(!again.files.contains_key(&gone));
 
         for bad in ["{not json", r#"{"v":0,"files":{}}"#, r#"{"files":{}}"#] {
@@ -899,10 +1201,10 @@ mod tests {
                 .collect();
             write(tmp.path(), &format!("p{}/c{i}.jsonl", i % 3), &lines);
         }
-        let serial = scan_report(&mut Store::default(), tmp.path(), &HashMap::new(), 30, MAX_FILE_BYTES, 1);
-        let parallel = scan_report(&mut Store::default(), tmp.path(), &HashMap::new(), 30, MAX_FILE_BYTES, 8);
+        let serial = scan_report(&mut Store::default(), tmp.path(), &HashMap::new(), "30", MAX_FILE_BYTES, 1);
+        let parallel = scan_report(&mut Store::default(), tmp.path(), &HashMap::new(), "30", MAX_FILE_BYTES, 8);
         assert_eq!(serde_json::to_value(&serial).unwrap(), serde_json::to_value(&parallel).unwrap());
-        assert_eq!(serial.totals.tokens.total, exact_total(tmp.path(), 30));
+        assert_eq!(serial.totals.tokens.total, exact_total(tmp.path(), "30"));
     }
 
     /// Where the 10-minute slots differ from an exact per-message count, measured.
@@ -917,25 +1219,146 @@ mod tests {
         let mut resumed = history.clone();
         resumed.extend((0..5).map(|i| asst_at(&format!("n{i}"), slot0 + 3 * SLOT_MS + i * 60_000, "C:\\a", "opus", 7, 7, 7, 7)));
         write(tmp.path(), "p/b.jsonl", &resumed);
-        assert_eq!(run(tmp.path(), &HashMap::new(), 7, MAX_FILE_BYTES).totals.tokens.total, exact_total(tmp.path(), 7));
+        assert_eq!(run(tmp.path(), &HashMap::new(), "7", MAX_FILE_BYTES).totals.tokens.total, exact_total(tmp.path(), "7"));
 
         // Worst case: new messages share a slot with repeated ones of a very different size; the
         // repeated ones are then removed by the slot's average.
         let tmp = tempfile::tempdir().unwrap();
         write(tmp.path(), "p/a.jsonl", &[asst_at("x", slot0 + 60_000, "C:\\a", "opus", 0, 0, 0, 1000)]);
         write(tmp.path(), "p/b.jsonl", &[asst_at("x", slot0 + 60_000, "C:\\a", "opus", 0, 0, 0, 1000), asst_at("y", slot0 + 120_000, "C:\\a", "opus", 0, 0, 0, 10)]);
-        let (got, exact) = (run(tmp.path(), &HashMap::new(), 7, MAX_FILE_BYTES).totals.tokens.total, exact_total(tmp.path(), 7));
+        let (got, exact) = (run(tmp.path(), &HashMap::new(), "7", MAX_FILE_BYTES).totals.tokens.total, exact_total(tmp.path(), "7"));
         println!("mixed slot: cached {got}, exact {exact}, error {:+.1}%", (got as f64 / exact as f64 - 1.0) * 100.0);
         assert_eq!((got, exact), (1505, 1010));
 
-        // Window start: the slot it falls in counts whole (here a message 5 minutes before it).
+        // Windows start at local midnight, a slot boundary, so the window edge is exact.
         let tmp = tempfile::tempdir().unwrap();
-        let start = now() - 7 * DAY_MS;
-        let before = start.div_euclid(SLOT_MS) * SLOT_MS + (start.rem_euclid(SLOT_MS) / 2);
-        write(tmp.path(), "p/a.jsonl", &[asst_at("early", before, "C:\\a", "opus", 4, 0, 0, 0), asst("in", 1.0, "C:\\a", "opus", 1, 0, 0, 0)]);
-        let got = run(tmp.path(), &HashMap::new(), 7, MAX_FILE_BYTES).totals.tokens.total;
-        let exact = exact_total(tmp.path(), 7);
-        assert!(exact == 1 && (got == 1 || got == 5), "at most one slot (10 min) extra: cached {got}, exact {exact}");
+        let start = window("7", now(), &Utc).0;
+        write(tmp.path(), "p/a.jsonl", &[asst_at("early", start - 60_000, "C:\\a", "opus", 4, 0, 0, 0), asst_at("first", start, "C:\\a", "opus", 1, 0, 0, 0)]);
+        assert_eq!((run(tmp.path(), &HashMap::new(), "7", MAX_FILE_BYTES).totals.tokens.total, exact_total(tmp.path(), "7")), (1, 1));
+    }
+
+    #[test]
+    fn prices_match_by_id_prefix_and_unknown_models_are_unpriced() {
+        assert_eq!(price("claude-opus-4-8"), Some([5.0, 25.0, 6.25, 0.50]));
+        assert_eq!(price("claude-opus-4-6-20260115"), price("claude-opus-4-6"));
+        assert_eq!(price("claude-opus-5-5[1m]"), Some([4.0, 20.0, 5.0, 0.20]));
+        // A longer id is never priced as its shorter prefix, nor the other way round.
+        assert_eq!(price("claude-opus-5-5"), Some([4.0, 20.0, 5.0, 0.20]));
+        assert_eq!(price("claude-opus-5"), Some([5.0, 25.0, 6.25, 0.50]));
+        assert_eq!(price("claude-opus-5-9"), None);
+        for unknown in ["claude-sonnet-4-5-20250929", "claude-opus-4-1-20250805", "gpt-4o", "<synthetic>", "bilinmiyor", ""] {
+            assert_eq!(price(unknown), None, "{unknown}");
+        }
+        assert_eq!((family("claude-opus-4-8"), family("claude-haiku-5-5"), family("gpt-4o")), ("opus", "haiku", "other"));
+    }
+
+    #[test]
+    fn cost_uses_the_four_prices_and_leaves_unpriced_tokens_out() {
+        const M: u64 = 1_000_000;
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "p/c.jsonl", &[
+            asst("a", 0.1, "C:\\a", "claude-opus-4-8", M, M, M, M),
+            asst("b", 0.1, "C:\\a", "claude-sonnet-5-5-20261001", 2 * M, 0, 0, 10 * M),
+            asst("c", 0.1, "C:\\a", "gpt-4o", 3 * M, 0, 0, 0),
+        ]);
+        let r = run(tmp.path(), &HashMap::new(), "7", MAX_FILE_BYTES);
+        // Opus 4.8: 5 + 25 + 6.25 + 0.5; Sonnet 5.5: 2 x 2 + 10 x 0.1; gpt-4o: no price.
+        let c = r.totals.cost;
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(near(c.input, 9.0) && near(c.output, 25.0) && near(c.cache_write, 6.25) && near(c.cache_read, 1.5) && near(c.total, 41.75), "{c:?}");
+        assert_eq!((r.totals.unpriced.input, r.totals.tokens.input), (3 * M, 6 * M), "unpriced tokens still count as tokens");
+        assert_eq!(r.models.iter().find(|m| m.model == "gpt-4o").unwrap().cost, None);
+        assert!(near(r.projects[0].cost, 41.75) && near(r.chats[0].cost, 41.75));
+    }
+
+    #[test]
+    fn days_and_hours_follow_the_local_time_zone() {
+        let tz = FixedOffset::east_opt(3 * 3600).unwrap();
+        let at = |d: u32, h: u32, m: u32| tz.with_ymd_and_hms(2026, 11, d, h, m, 0).unwrap().timestamp_millis();
+        let now = at(11, 15, 0);
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "p/c.jsonl", &[
+            asst_at("a", at(10, 23, 50), "C:\\a", "claude-opus-4-8", 1, 0, 0, 0),
+            asst_at("b", at(11, 0, 10), "C:\\a", "claude-sonnet-5-5", 10, 0, 0, 0),
+            // The first minute of the 7-day window, and the last one before it.
+            asst_at("c", at(5, 0, 0), "C:\\a", "claude-opus-4-8", 100, 0, 0, 0),
+            asst_at("d", at(4, 23, 59), "C:\\a", "claude-opus-4-8", 1000, 0, 0, 0),
+        ]);
+        let mut store = Store::default();
+        let scan = refresh(&mut store, tmp.path(), scan_from("7", now, &tz), MAX_FILE_BYTES, &quiet(2));
+        let r = report(&store, &scan, &HashMap::new(), "7", now, &tz, MAX_FILE_BYTES);
+        assert_eq!((r.start, r.days.len(), r.totals.tokens.work), (at(5, 0, 0), 7, 111));
+        let work = |i: usize, f: &str| r.days[i].families.get(f).map_or(0, |a| a.work);
+        assert_eq!((work(0, "opus"), work(5, "opus"), work(6, "sonnet"), work(6, "opus")), (100, 1, 10, 0));
+        assert_eq!(r.days[6].start, at(11, 0, 0));
+        assert_eq!((r.hours[23].work, r.hours[0].work), (1, 110));
+        // "today" is the local day so far; all time starts on the first day with usage.
+        let today = report(&store, &scan, &HashMap::new(), "today", now, &tz, MAX_FILE_BYTES);
+        assert_eq!((today.days.len(), today.totals.tokens.work), (1, 10));
+        let all = report(&store, &scan, &HashMap::new(), "all", now, &tz, MAX_FILE_BYTES);
+        assert_eq!((all.start, all.days.len(), all.totals.tokens.work, all.previous.is_none()), (at(4, 0, 0), 8, 1111, true));
+    }
+
+    #[test]
+    fn the_previous_period_covers_the_same_hours_one_span_earlier() {
+        let tz = FixedOffset::east_opt(3 * 3600).unwrap();
+        let at = |d: u32, h: u32| tz.with_ymd_and_hms(2026, 11, d, h, 0, 0).unwrap().timestamp_millis();
+        let now = at(11, 15);
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "p/c.jsonl", &[
+            asst_at("today", at(11, 9), "C:\\a", "claude-opus-4-8", 200, 0, 0, 0),
+            asst_at("yday-same", at(10, 9), "C:\\a", "claude-opus-4-8", 100, 0, 0, 0),
+            // Later in the day than "now": outside yesterday's comparison span.
+            asst_at("yday-later", at(10, 16), "C:\\a", "claude-opus-4-8", 1000, 0, 0, 0),
+            asst_at("week-ago", at(4, 9), "C:\\a", "claude-opus-4-8", 7, 0, 0, 0),
+        ]);
+        let mut store = Store::default();
+        let scan = refresh(&mut store, tmp.path(), scan_from("7", now, &tz), MAX_FILE_BYTES, &quiet(2));
+        let today = report(&store, &scan, &HashMap::new(), "today", now, &tz, MAX_FILE_BYTES);
+        let prev = today.previous.unwrap();
+        assert_eq!((today.totals.tokens.work, prev.tokens.work), (200, 100));
+        assert!((prev.cost - 100.0 * 5.0 / 1e6).abs() < 1e-12);
+        // 7 days: Nov 5 00:00 - Nov 11 15:00 against Oct 29 00:00 - Nov 4 15:00.
+        let week = report(&store, &scan, &HashMap::new(), "7", now, &tz, MAX_FILE_BYTES);
+        assert_eq!((week.totals.tokens.work, week.previous.unwrap().tokens.work), (1300, 7));
+    }
+
+    #[test]
+    fn subagent_transcripts_count_toward_the_parent_chat() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "p/c1.jsonl", &[asst("a", 0.1, "C:\\a", "claude-opus-4-8", 30, 0, 0, 0)]);
+        write(tmp.path(), "p/c1/subagents/agent-1.jsonl", &[asst("b", 0.1, "C:\\a", "claude-opus-4-8", 10, 0, 0, 0)]);
+        write(tmp.path(), "p/c1/subagents/nested/agent-2.jsonl", &[asst("c", 0.1, "C:\\a", "claude-haiku-4-5", 5, 0, 0, 0)]);
+        // Other nested files belong to the chat but are not subagents.
+        write(tmp.path(), "p/c1/other/x.jsonl", &[asst("d", 0.1, "C:\\a", "claude-opus-4-8", 1, 0, 0, 0)]);
+        let r = run(tmp.path(), &HashMap::new(), "7", MAX_FILE_BYTES);
+        assert_eq!((r.totals.tokens.work, r.totals.subagent_tokens.work), (46, 15));
+        assert_eq!(r.chats.iter().map(|c| (c.cli_session_id.as_str(), c.tokens.work, c.messages)).collect::<Vec<_>>(), [("c1", 46, 4)]);
+        assert!((r.totals.subagent_cost - (10.0 * 5.0 + 5.0 * 1.0) / 1e6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn csv_lists_every_row_and_never_overwrites() {
+        crate::i18n::set_test_lang(crate::i18n::Lang::En);
+        let tmp = tempfile::tempdir().unwrap();
+        let (dir, out) = (tmp.path().join("projects"), tmp.path().join("downloads"));
+        fs::create_dir_all(&out).unwrap();
+        write(&dir, "p/c1.jsonl", &[asst("a", 0.1, "C:\\a, \"b\"", "claude-opus-4-8", 1_000_000, 0, 0, 0)]);
+        write(&dir, "p/c2.jsonl", &[asst("b", 0.1, "C:\\x", "gpt-4o", 3, 4, 0, 0)]);
+        let r = run(&dir, &HashMap::new(), "30", MAX_FILE_BYTES);
+        let first = write_csv(&r, &out, "2026-11-11").unwrap();
+        let second = write_csv(&r, &out, "2026-11-11").unwrap();
+        assert!(first.ends_with("claude-harcama-30-gun-2026-11-11.csv"), "{first:?}");
+        assert!(second.ends_with("claude-harcama-30-gun-2026-11-11 (2).csv"), "{second:?}");
+        let text = fs::read_to_string(&first).unwrap();
+        assert!(text.starts_with('\u{feff}'));
+        let lines: Vec<_> = text.trim_start_matches('\u{feff}').lines().collect();
+        assert_eq!(lines[0], "Section,Name,Folder,Tokens processed,Input,Output,Cache write,Cache read,API equivalent (USD),Messages,Last activity");
+        assert_eq!(lines.len(), 1 + 2 + 2 + 2, "header, 2 projects, 2 chats, 2 models");
+        assert!(lines[1].starts_with("Project,\"C:\\a, \"\"b\"\"\",\"C:\\a, \"\"b\"\"\",1000000,1000000,0,0,0,5.0000,1,"), "{}", lines[1]);
+        assert!(lines.iter().any(|l| l.starts_with("Model,gpt-4o,,7,3,4,0,0,,1,")), "an unpriced model has an empty cost");
+        assert_eq!(range_label("today"), "bugun");
+        assert_eq!(range_label("all"), "tum-zamanlar");
     }
 
     #[test]
@@ -1010,8 +1433,8 @@ mod tests {
         let mb = bytes as f64 / 1e6;
         let time = |label: &str, store: &mut Store, threads: usize| {
             let t = Instant::now();
-            let scan = refresh(store, &dir, 7, now(), MAX_FILE_BYTES, &quiet(threads));
-            let r = report(store, &scan, &HashMap::new(), 7, now(), MAX_FILE_BYTES);
+            let scan = refresh(store, &dir, scan_from("7", now(), &Utc), MAX_FILE_BYTES, &quiet(threads));
+            let r = report(store, &scan, &HashMap::new(), "7", now(), &Utc, MAX_FILE_BYTES);
             let el = t.elapsed();
             println!("{label:<28} {:>8.0} ms  ({} messages, {} tokens)", el.as_secs_f64() * 1000.0, r.totals.messages, r.totals.tokens.total);
             (r, scan.dirty)
@@ -1040,6 +1463,35 @@ mod tests {
         let (after, dirty) = time("warm after restart", &mut restarted, threads(false));
         assert!(!dirty);
         assert_eq!(serde_json::to_value(&after).unwrap(), serde_json::to_value(&warm).unwrap());
-        assert_eq!(warm.totals.tokens.total, exact_total(&dir, 7));
+        assert_eq!(warm.totals.tokens.total, exact_total(&dir, "7"));
+
+        // All time at the owner's scale, built in memory: 5,000 chats, 1M messages over a year.
+        let (mut big, mut files) = (Store::default(), Vec::new());
+        for f in 0..5000u64 {
+            let path = PathBuf::from(format!("C:/x/p{}/c{f}.jsonl", f % 40));
+            let base = (now() - f as i64 * 365 * DAY_MS / 5000).div_euclid(SLOT_MS);
+            let slots = (0..40u64)
+                .map(|k| {
+                    let s = base - k as i64;
+                    let i = (0..5).map(|j| (f << 20 | k << 4 | j) & ID_MASK).collect();
+                    Slot { s, m: "claude-opus-4-8".into(), c: format!("C:\\p{}", f % 40), t: [5, 300, 2_000, 40_000], n: 5, l: s * SLOT_MS, i }
+                })
+                .collect();
+            big.files.insert(path.clone(), FileRec { slots, ..Default::default() });
+            files.push(FileInfo { path, chat: format!("c{f}"), subagent: f % 7 == 0, mtime: now(), size: 1 });
+        }
+        let scan = Scan { files, failed: HashSet::new(), dirty: false };
+        let t = Instant::now();
+        let all = report(&big, &scan, &HashMap::new(), "all", now(), &Utc, MAX_FILE_BYTES);
+        println!("all time, 1M messages: report {:>6.0} ms  ({} days, {} chats)", t.elapsed().as_secs_f64() * 1000.0, all.days.len(), all.chats.len());
+        assert_eq!(all.totals.messages, 1_000_000);
+        let t = Instant::now();
+        save(&big, &studio).unwrap();
+        let size = fs::metadata(studio.join(CACHE_FILE)).unwrap().len();
+        println!("all time, 1M messages: save   {:>6.0} ms  ({:.1} MB cache)", t.elapsed().as_secs_f64() * 1000.0, size as f64 / 1e6);
+        let t = Instant::now();
+        let mut back = Store::default();
+        load(&mut back, &studio);
+        println!("all time, 1M messages: load   {:>6.0} ms", t.elapsed().as_secs_f64() * 1000.0);
     }
 }

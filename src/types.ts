@@ -228,11 +228,47 @@ export interface TokenSums {
   work: number;
 }
 
+/** USD at API list prices. */
+export interface Cost {
+  input: number;
+  output: number;
+  cacheWrite: number;
+  cacheRead: number;
+  total: number;
+}
+
+export type SpendingRange = "today" | "7" | "30" | "90" | "all";
+/** Work tokens and USD of one bucket. */
+export interface Amount {
+  work: number;
+  cost: number;
+}
+
 export interface SpendingReport {
-  days: number;
-  totals: { tokens: TokenSums; messages: number; chats: number };
-  projects: { cwd: string; tokens: TokenSums; chats: number; lastActivityAt: number }[];
-  chats: { cliSessionId: string; title: string; cwd: string; tokens: TokenSums; lastActivityAt: number }[];
-  models: { model: string; total: number; work: number }[];
+  range: SpendingRange;
+  /** Local midnight of the window's first day (ms). */
+  start: number;
+  totals: {
+    tokens: TokenSums;
+    cost: Cost;
+    messages: number;
+    chats: number;
+    /** Tokens of models with no list price (left out of `cost`). */
+    unpriced: TokenSums;
+    subagentTokens: TokenSums;
+    subagentCost: number;
+  };
+  /** The same span right before; null for all time. */
+  previous: { tokens: TokenSums; cost: number } | null;
+  projects: { cwd: string; tokens: TokenSums; cost: number; messages: number; chats: number; lastActivityAt: number }[];
+  chats: { cliSessionId: string; title: string; cwd: string; tokens: TokenSums; cost: number; messages: number; lastActivityAt: number }[];
+  /** `cost` null: no list price for this model. */
+  models: { model: string; family: string; tokens: TokenSums; cost: number | null; messages: number; lastActivityAt: number }[];
+  /** One per local day, oldest first; families: fable | mythos | opus | sonnet | haiku | other. */
+  days: { start: number; families: Record<string, Amount> }[];
+  /** By local hour of day, 0-23. */
+  hours: Amount[];
+  prices: { model: string; input: number; output: number; cacheWrite: number; cacheRead: number }[];
+  pricesAsOf: string;
   skippedFiles: number;
 }

@@ -120,9 +120,10 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  const handleExport = async (cliSessionId: string) => {
+  // Runs `save` (a backend command returning the new file's path) and offers "show in folder".
+  const saveFile = async (save: () => Promise<string>) => {
     try {
-      const path = await invoke<string>("export_chat_markdown", { cliSessionId });
+      const path = await save();
       setToast({
         type: "success",
         message: t("toast.exported", { file: path.split(/[\\/]/).pop() ?? path }),
@@ -135,6 +136,7 @@ export default function App() {
       setToast({ type: "error", message: String(e) });
     }
   };
+  const handleExport = (cliSessionId: string) => saveFile(() => invoke<string>("export_chat_markdown", { cliSessionId }));
 
   // Runs a long backend action behind the progress overlay.
   const runAction = async (firstStep: string, action: () => Promise<void>) => {
@@ -425,7 +427,7 @@ export default function App() {
           ) : page === "history" ? (
             <UsageHistoryPage accounts={accounts} threshold={data.automation.switchThresholdPercent} />
           ) : page === "spending" ? (
-            <SpendingPage />
+            <SpendingPage saveFile={saveFile} />
           ) : page === "chats" ? (
             <ChatsPage data={data} accounts={accounts} saveSelection={saveSelection} onOpenSettings={() => setPage("settings")} onExport={handleExport} />
           ) : page === "backups" ? (

@@ -866,6 +866,7 @@ pub fn run() {
             get_dashboard_state,
             get_usage_history,
             spending::get_spending,
+            spending::export_spending_csv,
             refresh_all_usage,
             run_health_check,
             chat_text::search_chats,
