@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Button } from "./ui";
+import { t } from "./i18n";
 
 /** Confirms removing an account from the app; same modal look as SwitchDialog. */
 export default function RemoveAccountDialog({
@@ -15,7 +16,7 @@ export default function RemoveAccountDialog({
 
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null;
-    // Destructive: start on "Vazgeç".
+    // Destructive: start on Cancel.
     box.current?.querySelector<HTMLElement>("[data-cancel]")?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") return onCancel();
@@ -47,25 +48,21 @@ export default function RemoveAccountDialog({
       >
         <div className="px-5 pt-5">
           <h2 id="remove-dialog-title" className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-            {name} hesabı kaldırılsın mı?
+            {t("remove.title", { name })}
           </h2>
           <div id="remove-dialog-text">
-            <p className="mt-3 text-[13px] font-medium text-zinc-700 dark:text-zinc-300">Silinen</p>
-            <p className="mt-0.5 text-pretty text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
-              Bu uygulamanın kaydettiği giriş kopyası.
-            </p>
-            <p className="mt-3 text-[13px] font-medium text-zinc-700 dark:text-zinc-300">Silinmeyen</p>
-            <p className="mt-0.5 text-pretty text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
-              Sohbetlerin ve Claude Desktop'taki hesabın silinmez; Claude Desktop'ta tekrar giriş yaparsan hesap geri gelir.
-            </p>
+            <p className="mt-3 text-[13px] font-medium text-zinc-700 dark:text-zinc-300">{t("remove.deleted")}</p>
+            <p className="mt-0.5 text-pretty text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">{t("remove.deletedText")}</p>
+            <p className="mt-3 text-[13px] font-medium text-zinc-700 dark:text-zinc-300">{t("remove.kept")}</p>
+            <p className="mt-0.5 text-pretty text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">{t("remove.keptText")}</p>
           </div>
         </div>
         <div className="mt-5 flex flex-wrap items-center justify-end gap-2 border-t border-zinc-100 px-5 py-4 dark:border-white/[0.06]">
           <Button data-cancel variant="ghost" onClick={onCancel}>
-            Vazgeç
+            {t("common.cancel")}
           </Button>
           <Button variant="danger" onClick={onConfirm}>
-            Kaldır
+            {t("remove.confirm")}
           </Button>
         </div>
       </div>

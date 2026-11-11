@@ -17,6 +17,7 @@ const DAY_MS: i64 = 86_400_000;
 const MAX_FILE_BYTES: u64 = 300 * 1024 * 1024;
 const TOP: usize = 15;
 const UNTITLED: &str = "Adsız sohbet";
+const UNTITLED_EN: &str = "Untitled chat";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -264,7 +265,7 @@ fn build(
         .map(|(id, a)| {
             let (title, cwd) = match known.get(&id) {
                 Some((t, c)) => (t.clone(), c.clone().unwrap_or_else(|| a.cwd.to_string())),
-                None => (UNTITLED.to_string(), a.cwd.to_string()),
+                None => (crate::i18n::t(UNTITLED, UNTITLED_EN).to_string(), a.cwd.to_string()),
             };
             ChatSpend { cli_session_id: id, title, cwd, tokens: a.tokens, last_activity_at: a.last }
         })
@@ -342,6 +343,7 @@ mod tests {
         write(tmp.path(), "p1/c2/subagents/agent-1.jsonl", &[asst("m5", 0.2, "C:\\a", "haiku", 0, 0, 0, 7)]);
 
         let known = HashMap::from([("c1".to_string(), ("Plan".to_string(), Some("C:\\a".to_string())))]);
+        crate::i18n::set_test_lang(crate::i18n::Lang::Tr);
         let r = run(tmp.path(), &known, 7, MAX_FILE_BYTES);
         assert_eq!(r.totals.tokens, TokenSums { input: 516, output: 26, cache_write: 31, cache_read: 48, total: 621 });
         assert_eq!((r.totals.messages, r.totals.chats, r.skipped_files), (5, 3, 0));

@@ -258,7 +258,11 @@ pub fn close_claude_desktop_and_wait(data_root: &Path, timeout: Duration) -> Res
     }
 
     if is_data_root_locked(data_root) {
-        return Err("Claude Desktop dosya kilitleri serbest bırakılamadı; lütfen açık pencereyi kapatıp tekrar deneyin.".to_string());
+        return Err(crate::i18n::t(
+            "Claude Desktop dosya kilitleri serbest bırakılamadı; lütfen açık pencereyi kapatıp tekrar deneyin.",
+            "Claude Desktop didn't release its file locks; close its open window and try again.",
+        )
+        .to_string());
     }
     Ok(true)
 }
@@ -302,9 +306,9 @@ pub fn launch_claude_desktop() -> Result<bool, String> {
             cmd.creation_flags(CREATE_NO_WINDOW);
             cmd.spawn()
                 .map(|_| true)
-                .map_err(|e| format!("Claude Desktop başlatılamadı: {e}"))
+                .map_err(|e| crate::i18n::t(format!("Claude Desktop başlatılamadı: {e}"), format!("Couldn't start Claude Desktop: {e}")))
         } else {
-            Err("Claude Desktop uygulaması bulunamadı.".to_string())
+            Err(crate::i18n::t("Claude Desktop uygulaması bulunamadı.", "Claude Desktop app not found.").to_string())
         }
     }
     #[cfg(not(windows))]
@@ -399,7 +403,7 @@ pub fn capture_active_account_state(
     // 1. Copy Electron Desktop auth files if unlocked
     if data_root_has_live_auth(data_root) && !is_data_root_locked(data_root) {
         copy_desktop_auth_tree(data_root, &desktop_auth_dst)
-            .map_err(|e| format!("Desktop auth kopyalanamadı: {e}"))?;
+            .map_err(|e| crate::i18n::t(format!("Desktop auth kopyalanamadı: {e}"), format!("Couldn't copy the Desktop login: {e}")))?;
     }
 
     // 2. Capture CLI `.credentials.json` and `.claude.json` (`oauthAccount`) if they match this account
@@ -485,7 +489,12 @@ pub fn restore_target_account_state(
         };
 
         copy_desktop_auth_tree(&desktop_auth_src, data_root)
-            .map_err(|e| format!("Hedef hesap Desktop oturumu geri yüklenemedi: {e}"))?;
+            .map_err(|e| {
+                crate::i18n::t(
+                    format!("Hedef hesap Desktop oturumu geri yüklenemedi: {e}"),
+                    format!("Couldn't restore the target account's Desktop session: {e}"),
+                )
+            })?;
 
         if let Some(ls_bytes) = saved_ls {
             let _ = atomic_write_verified(&data_root.join("Local State"), &ls_bytes);

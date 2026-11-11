@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { FileDown, Folder, FolderOpen, Loader2, Search, Star } from "lucide-react";
 import { AccountProfile, AutomationSettings, FullDashboardPayload, SearchHit, SessionRecord } from "../types";
 import { accountName, Card, formatDateShort, focusRing, Segmented } from "../ui";
+import { t } from "../i18n";
 
 export type Selection = Pick<
   AutomationSettings,
@@ -35,8 +36,8 @@ function ExportButton({ title, onClick }: { title: string; onClick: () => void }
     <button
       type="button"
       onClick={onClick}
-      title="Markdown olarak kaydet"
-      aria-label={`"${title}" sohbetini Markdown olarak kaydet`}
+      title={t("chats.exportTitle")}
+      aria-label={t("chats.exportAria", { title })}
       className={`shrink-0 rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/10 dark:hover:text-zinc-200 ${focusRing}`}
     >
       <FileDown className="h-4 w-4" aria-hidden />
@@ -137,7 +138,7 @@ export default function ChatsPage({
       });
     };
     return (
-      <span role="group" aria-label="Aktarılacak hesaplar" className="flex shrink-0 gap-1">
+      <span role="group" aria-label={t("chats.targets")} className="flex shrink-0 gap-1">
         {accounts.map((acc) => {
           const active = on.includes(acc.accountUuid);
           const name = accountName(acc).name;
@@ -148,7 +149,7 @@ export default function ChatsPage({
               aria-pressed={active}
               disabled={active && on.length === 1}
               onClick={() => toggle(acc.accountUuid)}
-              title={active && on.length === 1 ? `${name}: en az bir hesap seçili kalmalı` : name}
+              title={active && on.length === 1 ? t("chats.lastTarget", { name }) : name}
               className={`max-w-[7rem] truncate rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset transition disabled:cursor-default ${focusRing} ${
                 active
                   ? "bg-[#D97757]/10 text-[#A8492A] dark:text-[#EBA488] ring-[#D97757]/35"
@@ -178,16 +179,16 @@ export default function ChatsPage({
             checked={checked}
             disabled={viaGroup || viaFolder || !s.cliSessionId}
             onChange={() => togglePick("selectedChats", s.cliSessionId!, `chat:${s.cliSessionId}`)}
-            aria-label={`"${s.title}" sohbetini önceden onayla`}
+            aria-label={t("chats.approveChat", { title: s.title })}
             className={checkboxClass}
           />
         )}
         <div className="min-w-0 flex-1">
           <p className="flex items-center gap-1.5 truncate text-sm text-zinc-800 dark:text-zinc-200">
-            {s.isStarred && <Star className="h-3 w-3 shrink-0 fill-amber-400 text-amber-400" aria-label="Yıldızlı" />}
+            {s.isStarred && <Star className="h-3 w-3 shrink-0 fill-amber-400 text-amber-400" aria-label={t("chats.starred")} />}
             <span className="truncate">{s.title}</span>
           </p>
-          <p className="truncate font-mono text-[11px] text-zinc-400">{s.cwd || "klasör yok"}</p>
+          <p className="truncate font-mono text-[11px] text-zinc-400">{s.cwd || t("common.noFolder")}</p>
         </div>
         {selecting && own && !viaGroup && !viaFolder && targetChips(`chat:${s.cliSessionId}`)}
         {s.cliSessionId && <ExportButton title={s.title} onClick={() => onExport(s.cliSessionId!)} />}
@@ -215,34 +216,34 @@ export default function ChatsPage({
               type="search"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={mode === "content" ? "Sohbet içinde ara (en az 3 harf)" : "Başlık veya klasör ara"}
-              aria-label="Sohbet ara"
+              placeholder={mode === "content" ? t("chats.placeholderContent") : t("chats.placeholderTitle")}
+              aria-label={t("chats.search")}
               className="h-9 w-full rounded-lg border border-zinc-200 dark:border-white/10 bg-white dark:bg-[#17181c] pl-9 pr-9 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:border-[#D97757] focus:outline-none focus:ring-2 focus:ring-[#D97757]/25"
             />
-            {searching && <Loader2 className="absolute right-3 top-2.5 h-4 w-4 animate-spin text-[#D97757]" role="status" aria-label="Aranıyor" />}
+            {searching && <Loader2 className="absolute right-3 top-2.5 h-4 w-4 animate-spin text-[#D97757]" role="status" aria-label={t("chats.searching")} />}
           </div>
           <Segmented
-            label="Arama yeri"
+            label={t("chats.searchIn")}
             options={[
-              { value: "title", label: "Başlıkta" },
-              { value: "content", label: "İçerikte" },
+              { value: "title", label: t("chats.inTitle") },
+              { value: "content", label: t("chats.inContent") },
             ]}
             value={mode}
             onChange={setMode}
           />
           {selecting ? (
             <span className="max-w-[45%] text-pretty text-right text-[13px] leading-snug text-zinc-600 dark:text-zinc-400">
-              Önceden onayla: işaretlenenler sormadan aktarılır
+              {t("chats.preapprove")}
             </span>
           ) : (
             <span className="max-w-[50%] text-pretty text-right text-[13px] leading-snug text-zinc-600 dark:text-zinc-400">
-              Tüm sohbetler otomatik aktarılıyor ·{" "}
+              {t("chats.allAuto")}{" "}
               <button
                 type="button"
                 onClick={onOpenSettings}
                 className={`rounded font-medium text-[#A8492A] underline-offset-2 hover:underline dark:text-[#EBA488] ${focusRing}`}
               >
-                Ayarlar'dan değiştir
+                {t("chats.changeInSettings")}
               </button>
             </span>
           )}
@@ -250,10 +251,13 @@ export default function ChatsPage({
         {selecting && (
           <p className="text-pretty border-t border-zinc-100 dark:border-white/[0.06] px-4 py-2.5 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
             <span className="font-medium text-zinc-700 dark:text-zinc-300">
-              {sel.selectedChats.length} sohbet, {sel.selectedGroups.length} bölüm, {sel.selectedFolders.length} klasör önceden onaylı.
+              {t("chats.preapproved", {
+                chats: t("count.chats", { n: sel.selectedChats.length }),
+                sections: t("count.sections", { n: sel.selectedGroups.length }),
+                folders: t("count.folders", { n: sel.selectedFolders.length }),
+              })}
             </span>{" "}
-            İşaretlediklerin sormadan aktarılır; bir bölümü ya da klasörü işaretleyince içindeki tüm sohbetler gider. Yanındaki hesap
-            etiketleri nereye gideceğini belirler. Diğer yeni sohbetler hesap değiştirirken sorulur; daha önce aktarılanlar silinmez.
+            {t("chats.help")}
           </p>
         )}
       </Card>
@@ -266,7 +270,7 @@ export default function ChatsPage({
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm text-zinc-800 dark:text-zinc-200">{h.title}</p>
                   <p className="text-pretty text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-                    <span className="mr-1.5 font-medium text-zinc-600 dark:text-zinc-300">{h.matchedRole === "user" ? "Sen:" : "Claude:"}</span>
+                    <span className="mr-1.5 font-medium text-zinc-600 dark:text-zinc-300">{h.matchedRole === "user" ? t("chats.you") : t("chats.claude")}</span>
                     <Highlighted text={h.snippet} query={contentQuery} />
                   </p>
                 </div>
@@ -276,7 +280,7 @@ export default function ChatsPage({
             ))}
             {!searching && (
               <li className="py-8 text-center text-sm text-zinc-500 dark:text-zinc-400">
-                {searchError ?? (contentQuery.length < 3 ? "Aramak için en az 3 harf yaz." : hits && hits.length === 0 ? "Sonuç yok." : null)}
+                {searchError ?? (contentQuery.length < 3 ? t("chats.min3") : hits && hits.length === 0 ? t("common.noResults") : null)}
               </li>
             )}
           </ul>
@@ -298,7 +302,7 @@ export default function ChatsPage({
                     type="checkbox"
                     checked={sel.selectedGroups.includes(g.id)}
                     onChange={() => togglePick("selectedGroups", g.id, `group:${g.id}`)}
-                    aria-label={`"${g.name}" bölümünü önceden onayla`}
+                    aria-label={t("chats.approveSection", { name: g.name })}
                     className={checkboxClass}
                   />
                 ),
@@ -323,7 +327,7 @@ export default function ChatsPage({
                     type="checkbox"
                     checked={picked}
                     onChange={() => togglePick("selectedFolders", key, `folder:${key}`)}
-                    aria-label={`"${path}" klasöründeki sohbetleri önceden onayla`}
+                    aria-label={t("chats.approveFolder", { path })}
                     className={checkboxClass}
                   />,
                   picked && targetChips(`folder:${key}`),
@@ -334,7 +338,7 @@ export default function ChatsPage({
             );
           })}
           {flatSessions.map((s) => sessionRow(s, false))}
-          {filteredSessions.length === 0 && <li className="py-8 text-center text-sm text-zinc-500 dark:text-zinc-400">Sonuç yok.</li>}
+          {filteredSessions.length === 0 && <li className="py-8 text-center text-sm text-zinc-500 dark:text-zinc-400">{t("common.noResults")}</li>}
         </ul>
       </Card>
       )}

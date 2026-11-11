@@ -2,6 +2,7 @@
 //! (`~/.claude/projects/<project>/<cliSessionId>.jsonl`); the only thing written is a new export file.
 
 use crate::sync_engine::{scan_all_sessions, SessionRecord};
+use crate::i18n;
 use crate::AppState;
 use serde::Serialize;
 use serde_json::Value;
@@ -63,9 +64,9 @@ fn parse_line(line: &str) -> Option<(bool, Vec<Part>)> {
 /// Calls `f` for every user/assistant message; `f` returns false to stop early.
 /// Files over the size cap are an error, never partially read.
 fn for_each_message(path: &Path, mut f: impl FnMut(bool, Vec<Part>) -> bool) -> Result<(), String> {
-    let file = File::open(path).map_err(|e| format!("Sohbet dosyası açılamadı: {e}"))?;
+    let file = File::open(path).map_err(|e| i18n::t(format!("Sohbet dosyası açılamadı: {e}"), format!("Couldn't open the chat file: {e}")))?;
     if file.metadata().map_err(|e| e.to_string())?.len() > MAX_FILE_BYTES {
-        return Err("Sohbet dosyası çok büyük (200 MB üstü).".into());
+        return Err(i18n::t("Sohbet dosyası çok büyük (200 MB üstü).", "The chat file is too large (over 200 MB).").into());
     }
     let mut reader = BufReader::new(file);
     let mut buf = Vec::new();
@@ -165,7 +166,7 @@ fn safe_file_stem(title: &str) -> String {
         .take(80)
         .collect();
     let cleaned = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
-    if cleaned.is_empty() { "Sohbet".into() } else { cleaned.into() }
+    if cleaned.is_empty() { i18n::t("Sohbet", "Chat").into() } else { cleaned.into() }
 }
 
 fn day_of(ms: i64) -> String {
@@ -184,32 +185,37 @@ fn create_unique(dir: &Path, stem: &str) -> Result<(File, PathBuf), String> {
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(f) => return Ok((f, path)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("Dosya yazılamadı: {e}")),
+            Err(e) => return Err(write_failed(e)),
         }
     }
     unreachable!()
 }
 
+fn write_failed(e: std::io::Error) -> String {
+    i18n::t(format!("Dosya yazılamadı: {e}"), format!("Couldn't write the file: {e}"))
+}
+
 fn export_markdown(transcript: &Path, session: &SessionRecord, dir: &Path) -> Result<PathBuf, String> {
+    let (folder, date, you, tool) = i18n::t(("Klasör", "Tarih", "Sen", "Araç"), ("Folder", "Date", "You", "Tool"));
     let mut md = format!("# {}\n\n", session.title);
     if let Some(cwd) = session.cwd.as_deref().or(session.origin_cwd.as_deref()) {
-        md.push_str(&format!("**Klasör:** {cwd}  \n"));
+        md.push_str(&format!("**{folder}:** {cwd}  \n"));
     }
     let day = day_of(session.last_activity_at);
-    md.push_str(&format!("**Tarih:** {day}\n"));
+    md.push_str(&format!("**{date}:** {day}\n"));
     for_each_message(transcript, |is_user, parts| {
-        md.push_str(if is_user { "\n---\n\n**Sen:**\n" } else { "\n---\n\n**Claude:**\n" });
+        md.push_str(&format!("\n---\n\n**{}:**\n", if is_user { you } else { "Claude" }));
         for p in parts {
             match p {
                 Part::Text(t) => md.push_str(&format!("\n{}\n", t.trim())),
-                Part::Tool(name) => md.push_str(&format!("\n_Araç: {name}_\n")),
+                Part::Tool(name) => md.push_str(&format!("\n_{tool}: {name}_\n")),
             }
         }
         true
     })?;
-    fs::create_dir_all(dir).map_err(|e| format!("Klasör oluşturulamadı: {e}"))?;
+    fs::create_dir_all(dir).map_err(|e| i18n::t(format!("Klasör oluşturulamadı: {e}"), format!("Couldn't create the folder: {e}")))?;
     let (mut file, path) = create_unique(dir, &format!("{} ({day})", safe_file_stem(&session.title)))?;
-    file.write_all(md.as_bytes()).map_err(|e| format!("Dosya yazılamadı: {e}"))?;
+    file.write_all(md.as_bytes()).map_err(write_failed)?;
     Ok(path)
 }
 
@@ -218,14 +224,18 @@ fn export_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("C:\\Users\\Default"))
         .join("Downloads")
-        .join("Claude Sohbetleri")
+        .join("Claude Sohbetleri") // fixed name: `reveal_in_explorer` only opens files inside it
 }
 
 /// Canonical path of `path` if it is inside `dir`, else an error.
 fn inside_dir(path: &Path, dir: &Path) -> Result<PathBuf, String> {
-    let canon = path.canonicalize().map_err(|_| "Dosya bulunamadı.".to_string())?;
-    let base = dir.canonicalize().map_err(|_| "Dışa aktarma klasörü bulunamadı.".to_string())?;
-    if canon.starts_with(&base) { Ok(canon) } else { Err("Yalnızca dışa aktarılan dosyalar gösterilebilir.".into()) }
+    let canon = path.canonicalize().map_err(|_| i18n::t("Dosya bulunamadı.", "File not found.").to_string())?;
+    let base = dir.canonicalize().map_err(|_| i18n::t("Dışa aktarma klasörü bulunamadı.", "Export folder not found.").to_string())?;
+    if canon.starts_with(&base) {
+        Ok(canon)
+    } else {
+        Err(i18n::t("Yalnızca dışa aktarılan dosyalar gösterilebilir.", "Only exported files can be shown.").into())
+    }
 }
 
 /// The chats the app lists: one per CLI session id, newest first, with a transcript id.
@@ -259,10 +269,10 @@ pub fn export_chat_markdown(cli_session_id: String, state: State<'_, AppState>) 
     let session = sessions
         .iter()
         .find(|s| s.cli_session_id.as_deref() == Some(cli_session_id.as_str()))
-        .ok_or("Sohbet bulunamadı.")?;
+        .ok_or_else(|| i18n::t("Sohbet bulunamadı.", "Chat not found.").to_string())?;
     let transcript = index_transcripts(&projects)
         .remove(&cli_session_id)
-        .ok_or("Bu sohbetin içeriği diskte yok.")?;
+        .ok_or_else(|| i18n::t("Bu sohbetin içeriği diskte yok.", "This chat's content is not on disk.").to_string())?;
     Ok(export_markdown(&transcript, session, &export_dir())?.to_string_lossy().into_owned())
 }
 
@@ -277,13 +287,13 @@ pub fn reveal_in_explorer(path: String) -> Result<(), String> {
         std::process::Command::new("explorer.exe")
             .raw_arg(format!("/select,\"{shown}\""))
             .spawn()
-            .map_err(|e| format!("Gezgin açılamadı: {e}"))?;
+            .map_err(|e| i18n::t(format!("Gezgin açılamadı: {e}"), format!("Couldn't open File Explorer: {e}")))?;
         Ok(())
     }
     #[cfg(not(windows))]
     {
         let _ = canon;
-        Err("Yalnızca Windows'ta desteklenir.".into())
+        Err(i18n::t("Yalnızca Windows'ta desteklenir.", "Only supported on Windows.").into())
     }
 }
 
@@ -406,6 +416,7 @@ mod tests {
         );
         let out = tmp.path().join("out");
         let s = session("c1", "Plan: a/b?");
+        i18n::set_test_lang(i18n::Lang::Tr);
         let p1 = export_markdown(&t, &s, &out).unwrap();
         let name = p1.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with("Plan- a-b- (20") && name.ends_with(").md"), "{name}");
@@ -419,12 +430,20 @@ mod tests {
         let p3 = export_markdown(&t, &s, &out).unwrap();
         assert!(p2.to_string_lossy().ends_with(" (2).md") && p3.to_string_lossy().ends_with(" (3).md"));
         assert_eq!(fs::read_to_string(&p1).unwrap(), md);
+
+        i18n::set_test_lang(i18n::Lang::En);
+        let en = fs::read_to_string(export_markdown(&t, &s, &out).unwrap()).unwrap();
+        assert!(en.contains("**Folder:** C:\\work\\demo") && en.contains("**Date:** 20"));
+        assert!(en.contains("**You:**\n\nsoru?") && en.contains("**Claude:**\n\ncevap") && en.contains("_Tool: Bash_"));
     }
 
     #[test]
     fn oversized_or_unknown_files_are_not_read() {
         assert!(for_each_message(Path::new("yok.jsonl"), |_, _| true).is_err());
+        i18n::set_test_lang(i18n::Lang::Tr);
         assert_eq!(safe_file_stem("  ... "), "Sohbet");
+        i18n::set_test_lang(i18n::Lang::En);
+        assert_eq!(safe_file_stem("  ... "), "Chat");
     }
 
     #[test]

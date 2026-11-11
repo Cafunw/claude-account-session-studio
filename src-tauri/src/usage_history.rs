@@ -193,18 +193,28 @@ pub fn forecast(samples: &[UsageSample], now_ms: i64, resets_at_ms: Option<i64>)
 }
 
 pub fn forecast_text(f: &Forecast, tz: &FixedOffset) -> String {
+    use crate::i18n::t;
     const DAYS: [&str; 7] = ["pazartesi", "salı", "çarşamba", "perşembe", "cuma", "cumartesi", "pazar"];
-    let unknown = "; sıfırlanma zamanı bilinmiyor";
+    const DAYS_EN: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    let unknown = t("; sıfırlanma zamanı bilinmiyor", "; reset time unknown");
     match f {
-        Forecast::NotEnoughData => "Tahmin için yeterli veri yok".into(),
-        Forecast::AlreadyFull => "Haftalık limit dolmuş".into(),
+        Forecast::NotEnoughData => t("Tahmin için yeterli veri yok", "Not enough data for a forecast").into(),
+        Forecast::AlreadyFull => t("Haftalık limit dolmuş", "Weekly limit reached").into(),
         Forecast::Fills { at, reset_known } => {
             let d = DateTime::<Utc>::from_timestamp_millis(*at).unwrap_or_default().with_timezone(tz);
-            let day = DAYS[chrono::Datelike::weekday(&d).num_days_from_monday() as usize];
-            format!("Bu hızla {day} {} civarı dolar{}", d.format("%H:%M"), if *reset_known { "" } else { unknown })
+            let i = chrono::Datelike::weekday(&d).num_days_from_monday() as usize;
+            let (time, rest) = (d.format("%H:%M"), if *reset_known { "" } else { unknown });
+            t(
+                format!("Bu hızla {} {time} civarı dolar{rest}", DAYS[i]),
+                format!("At this pace it fills up around {} {time}{rest}", DAYS_EN[i]),
+            )
         }
-        Forecast::WontFill { reset_known: true } => "Bu hızla sıfırlanmadan önce dolmaz".into(),
-        Forecast::WontFill { reset_known: false } => format!("Bu hızla bir hafta içinde dolmaz{unknown}"),
+        Forecast::WontFill { reset_known: true } => {
+            t("Bu hızla sıfırlanmadan önce dolmaz", "At this pace it won't fill up before the reset").into()
+        }
+        Forecast::WontFill { reset_known: false } => {
+            t(format!("Bu hızla bir hafta içinde dolmaz{unknown}"), format!("At this pace it won't fill up within a week{unknown}"))
+        }
     }
 }
 
@@ -341,9 +351,12 @@ mod tests {
         let tz = FixedOffset::east_opt(3 * 3600).unwrap();
         // 2026-11-12 is a Thursday; 15:30 UTC is 18:30 at +03:00.
         let at = DateTime::parse_from_rfc3339("2026-11-12T15:30:00Z").unwrap().timestamp_millis();
+        crate::i18n::set_test_lang(crate::i18n::Lang::Tr);
         assert_eq!(forecast_text(&Forecast::Fills { at, reset_known: true }, &tz), "Bu hızla perşembe 18:30 civarı dolar");
         assert!(forecast_text(&Forecast::Fills { at, reset_known: false }, &tz).ends_with("sıfırlanma zamanı bilinmiyor"));
         assert_eq!(forecast_text(&Forecast::WontFill { reset_known: true }, &tz), "Bu hızla sıfırlanmadan önce dolmaz");
         assert_eq!(forecast_text(&Forecast::NotEnoughData, &tz), "Tahmin için yeterli veri yok");
+        crate::i18n::set_test_lang(crate::i18n::Lang::En);
+        assert_eq!(forecast_text(&Forecast::Fills { at, reset_known: false }, &tz), "At this pace it fills up around Thursday 18:30; reset time unknown");
     }
 }

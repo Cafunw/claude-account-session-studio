@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { MoreVertical } from "lucide-react";
 import { AccountProfile, UsageWindow } from "./types";
+import { locale, pct, t } from "./i18n";
 
 export const focusRing =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97757]/70 focus-visible:ring-offset-1 dark:focus-visible:ring-offset-[#17181c]";
@@ -10,37 +11,37 @@ export function formatResetTime(iso: string | null): string {
   const target = new Date(iso).getTime();
   if (isNaN(target)) return "";
   const diffMs = target - Date.now();
-  if (diffMs <= 0) return "sıfırlanıyor";
+  if (diffMs <= 0) return t("fmt.resetting");
   const mins = Math.floor(diffMs / 60000);
   const days = Math.floor(mins / (60 * 24));
   const hours = Math.floor((mins % (60 * 24)) / 60);
-  if (days > 0) return `${days} gün ${hours} sa sonra sıfırlanır`;
-  if (hours > 0) return `${hours} sa ${mins % 60} dk sonra sıfırlanır`;
-  return `${mins % 60} dk sonra sıfırlanır`;
+  if (days > 0) return t("fmt.resetsDays", { d: days, h: hours });
+  if (hours > 0) return t("fmt.resetsHours", { h: hours, m: mins % 60 });
+  return t("fmt.resetsMins", { m: mins % 60 });
 }
 
 export function formatAgo(iso: string | null): string {
-  if (!iso) return "henüz yok";
+  if (!iso) return t("fmt.never");
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
-  if (isNaN(mins)) return "henüz yok";
-  if (mins < 1) return "az önce";
-  if (mins < 60) return `${mins} dk önce`;
-  if (mins < 1440) return `${Math.floor(mins / 60)} sa önce`;
-  return `${Math.floor(mins / 1440)} gün önce`;
+  if (isNaN(mins)) return t("fmt.never");
+  if (mins < 1) return t("fmt.justNow");
+  if (mins < 60) return t("fmt.minsAgo", { n: mins });
+  if (mins < 1440) return t("fmt.hoursAgo", { n: Math.floor(mins / 60) });
+  return t("fmt.daysAgo", { n: Math.floor(mins / 1440) });
 }
 
 export function formatDateShort(msOrIso: number | string | null): string {
   if (!msOrIso) return "—";
   const d = new Date(msOrIso);
   if (isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("tr-TR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString(locale(), { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
 // Desktop-only logins have no readable e-mail; the backend fills in "account-<id>@claude.ai".
 export function accountName(acc: AccountProfile): { name: string; hint: string | null } {
   const desktopOnly = acc.email.startsWith("account-") && acc.email.endsWith("@claude.ai");
   const base = desktopOnly
-    ? { name: "Claude hesabı", hint: acc.accountUuid.slice(0, 8) }
+    ? { name: t("account.desktopOnly"), hint: acc.accountUuid.slice(0, 8) }
     : { name: acc.email, hint: null };
   // A custom name takes the title; the original identity moves to the small line.
   return acc.customLabel ? { name: acc.customLabel, hint: [base.name, base.hint].filter(Boolean).join(" ") } : base;
@@ -185,7 +186,7 @@ export function QuotaBar({ label, ariaLabel, win }: { label: string; ariaLabel: 
     <div className="min-w-0 space-y-1">
       <div className="flex items-baseline justify-between gap-2 text-xs">
         <span className="truncate text-zinc-600 dark:text-zinc-400">{label}</span>
-        <span className="font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">%{win.utilization.toFixed(0)}</span>
+        <span className="font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">{pct(win.utilization)}</span>
       </div>
       <Meter pct={win.utilization} label={ariaLabel} />
       {reset && <p className="truncate text-[11px] tabular-nums text-zinc-400">{reset}</p>}
@@ -199,7 +200,7 @@ export function Avatar({ name, seed }: { name: string; seed: string }) {
   const color = avatarColors[[...seed].reduce((s, c) => s + c.charCodeAt(0), 0) % avatarColors.length];
   return (
     <span aria-hidden className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-semibold text-white ${color}`}>
-      {name.trim().charAt(0).toLocaleUpperCase("tr-TR") || "?"}
+      {name.trim().charAt(0).toLocaleUpperCase(locale()) || "?"}
     </span>
   );
 }

@@ -4,6 +4,7 @@
 
 use crate::accounts::{display_name, AccountProfile};
 use crate::backup::{list_backups, verify_backup_integrity};
+use crate::i18n::t;
 use crate::sync_engine::index_available_cli_transcripts;
 use serde::Serialize;
 use serde_json::Value;
@@ -53,7 +54,10 @@ pub fn build_report(
             .iter()
             .find(|a| a.account_uuid == uuid)
             .map(display_name)
-            .unwrap_or_else(|| format!("Hesap {}", uuid.chars().take(8).collect::<String>()));
+            .unwrap_or_else(|| {
+                let id = uuid.chars().take(8).collect::<String>();
+                t(format!("Hesap {id}"), format!("Account {id}"))
+            });
         // A chat copied into two orgs of one account counts as listed twice.
         let mut seen_cli: HashSet<String> = HashSet::new();
 
@@ -80,19 +84,19 @@ pub fn build_report(
             };
             let val = fs::read_to_string(&path).ok().and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
             let Some(val) = val else {
-                push(&name, "Dosya okunamıyor veya bozuk (JSON geçersiz).");
+                push(&name, t("Dosya okunamıyor veya bozuk (JSON geçersiz).", "File is unreadable or corrupt (invalid JSON)."));
                 continue;
             };
             let title = val.get("title").and_then(|v| v.as_str()).unwrap_or(&name).to_string();
             let cli = val.get("cliSessionId").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
             if val.get("transcriptUnavailable").and_then(|v| v.as_bool()).unwrap_or(false) {
-                push(&title, "Sohbet kaydı kullanılamıyor (transcriptUnavailable).");
+                push(&title, t("Sohbet kaydı kullanılamıyor (transcriptUnavailable).", "Chat transcript is unavailable (transcriptUnavailable)."));
             } else if cli.is_some_and(|id| !transcripts.contains(id)) {
-                push(&title, "Sohbetin kayıt dosyası (.jsonl) diskte bulunamadı.");
+                push(&title, t("Sohbetin kayıt dosyası (.jsonl) diskte bulunamadı.", "The chat's transcript file (.jsonl) is missing from disk."));
             }
             if let Some(id) = cli {
                 if !seen_cli.insert(id.to_string()) {
-                    push(&title, "Aynı sohbet bu hesapta birden fazla kez listelenmiş.");
+                    push(&title, t("Aynı sohbet bu hesapta birden fazla kez listelenmiş.", "The same chat is listed more than once in this account."));
                 }
             }
         }
@@ -105,7 +109,7 @@ pub fn build_report(
                 kind: "backup".into(),
                 owner: b.reason.clone(),
                 subject: b.id.clone(),
-                problem: format!("Yedek doğrulaması başarısız: {e}"),
+                problem: t(format!("Yedek doğrulaması başarısız: {e}"), format!("Backup verification failed: {e}")),
             });
         }
     }
@@ -169,6 +173,7 @@ mod tests {
         assert_eq!(clean.backup_problems, 0);
 
         fs::write(bdir.join("a.json"), b"tampered").unwrap();
+        crate::i18n::set_test_lang(crate::i18n::Lang::Tr);
         let r = build_report(&root, tmp.path().join("projects").as_path(), &[], &backups);
         assert_eq!(r.checked_chats, 5);
         assert_eq!(r.checked_backups, 1);
@@ -178,6 +183,9 @@ mod tests {
         let has = |s: &str| r.items.iter().any(|i| i.problem.contains(s));
         assert!(has("bozuk") && has("transcriptUnavailable") && has("bulunamadı") && has("birden fazla"));
         assert!(has("SHA-256"));
+        crate::i18n::set_test_lang(crate::i18n::Lang::En);
+        let en = build_report(&root, tmp.path().join("projects").as_path(), &[], &backups);
+        assert!(en.items.iter().any(|i| i.problem.contains("corrupt")) && en.items.iter().any(|i| i.problem.contains("more than once")));
         assert!(r.items.iter().all(|i| i.owner != "" ));
         assert_eq!(fs::read(bdir.join("a.json")).unwrap(), b"tampered"); // untouched
     }

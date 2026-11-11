@@ -3,6 +3,7 @@ import { ArrowRightLeft, CircleCheck, Clock, Gauge, Plus, RefreshCw, Users } fro
 import { AccountProfile } from "../types";
 import RemoveAccountDialog from "../RemoveAccountDialog";
 import { accountName, Avatar, Badge, Button, Card, formatAgo, Menu, Meter, QuotaBar, Segmented, StatCard } from "../ui";
+import { isUnknownPlan, pct, t } from "../i18n";
 
 type QuotaView = "both" | "five" | "week";
 
@@ -49,12 +50,12 @@ function AccountRow({
   const { fiveHour, sevenDay, sevenDaySonnet } = acc.usage;
   const hasQuota = fiveHour || sevenDay;
   const rows = [
-    view !== "week" && fiveHour && { key: "5s", title: "5 saatlik limit", bars: [{ label: "Tüm modeller", win: fiveHour }] },
+    view !== "week" && fiveHour && { key: t("acc.rowFive"), title: t("acc.fiveHourLimit"), bars: [{ label: t("acc.allModels"), win: fiveHour }] },
     view !== "five" &&
       sevenDay && {
-        key: "Hft",
-        title: "Haftalık limit",
-        bars: [{ label: "Tüm modeller", win: sevenDay }, ...(sevenDaySonnet ? [{ label: "Sonnet", win: sevenDaySonnet }] : [])],
+        key: t("acc.rowWeek"),
+        title: t("acc.weeklyLimit"),
+        bars: [{ label: t("acc.allModels"), win: sevenDay }, ...(sevenDaySonnet ? [{ label: "Sonnet", win: sevenDaySonnet }] : [])],
       },
   ].filter(Boolean) as { key: string; title: string; bars: { label: string; win: NonNullable<typeof fiveHour> }[] }[];
 
@@ -68,8 +69,8 @@ function AccountRow({
               autoFocus
               defaultValue={acc.customLabel ?? ""}
               maxLength={40}
-              placeholder="Hesaba isim ver"
-              aria-label="Hesap ismi"
+              placeholder={t("acc.namePlaceholder")}
+              aria-label={t("acc.nameLabel")}
               onBlur={(e) => finishEdit(e.currentTarget.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") e.currentTarget.blur();
@@ -83,14 +84,14 @@ function AccountRow({
           ) : (
             <h3 className="truncate text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">{name}</h3>
           )}
-          {acc.planType !== "Plan bilinmiyor" && <Badge>{acc.planType}</Badge>}
-          {emptiest && <Badge tone="green">En boş</Badge>}
+          {!isUnknownPlan(acc.planType) && <Badge>{acc.planType}</Badge>}
+          {emptiest && <Badge tone="green">{t("acc.emptiest")}</Badge>}
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
           {hint && <span className="truncate font-mono text-zinc-400">{hint}</span>}
           <Badge tone="green">Desktop</Badge>
           {acc.hasDpapiCredentials && <Badge tone="sky">CLI</Badge>}
-          <span className="tabular-nums">{acc.sessionCount} sohbet</span>
+          <span className="tabular-nums">{t("count.chats", { n: acc.sessionCount })}</span>
         </div>
 
         {rows.map((r) => (
@@ -106,11 +107,9 @@ function AccountRow({
           </div>
         ))}
         <div className="mt-2 space-y-0.5 text-[11px] text-zinc-400">
-          {!hasQuota && <p className="text-xs text-zinc-500 dark:text-zinc-400">Kota bilgisi yok. Bu hesap Claude Desktop'ta bir kez açılınca görünür.</p>}
-          {hasQuota && acc.usage.source === "desktop-history" && (
-            <p>Claude Desktop'un kaydından · {formatAgo(acc.usage.fetchedAt)}</p>
-          )}
-          {!acc.hasDpapiCredentials && <p>Anlık kota için terminalde bu hesapla bir kez giriş yap: claude → /login</p>}
+          {!hasQuota && <p className="text-xs text-zinc-500 dark:text-zinc-400">{t("acc.noQuota")}</p>}
+          {hasQuota && acc.usage.source === "desktop-history" && <p>{t("acc.fromDesktop", { ago: formatAgo(acc.usage.fetchedAt) })}</p>}
+          {!acc.hasDpapiCredentials && <p>{t("acc.cliHint")}</p>}
           {acc.usage.rateLimitNotice && <p className="text-xs text-rose-600 dark:text-rose-400">{acc.usage.rateLimitNotice}</p>}
         </div>
       </div>
@@ -119,26 +118,26 @@ function AccountRow({
         {acc.isActive ? (
           <span className="inline-flex items-center gap-1.5 rounded-md bg-emerald-50 dark:bg-emerald-400/10 px-2.5 py-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-300 ring-1 ring-inset ring-emerald-200 dark:ring-emerald-400/25">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden />
-            Açık
+            {t("acc.active")}
           </span>
         ) : (
-          <Button onClick={onSwitch} disabled={busy} className="h-8 px-3 text-xs" aria-label={`${name} hesabına geç`}>
+          <Button onClick={onSwitch} disabled={busy} className="h-8 px-3 text-xs" aria-label={t("acc.switchTo", { name })}>
             <ArrowRightLeft className="h-3.5 w-3.5" aria-hidden />
-            Geç
+            {t("acc.switch")}
           </Button>
         )}
         <Menu
-          label={`${name} için işlemler`}
+          label={t("acc.actionsFor", { name })}
           items={[
-            { label: "İsim ver", onSelect: () => setEditing(true) },
-            { label: "Yukarı taşı", onSelect: () => onMove("up"), disabled: first },
-            { label: "Aşağı taşı", onSelect: () => onMove("down"), disabled: last },
+            { label: t("acc.rename"), onSelect: () => setEditing(true) },
+            { label: t("acc.moveUp"), onSelect: () => onMove("up"), disabled: first },
+            { label: t("acc.moveDown"), onSelect: () => onMove("down"), disabled: last },
             {
-              label: "Hesabı kaldır",
+              label: t("acc.remove"),
               onSelect: onRemove,
               danger: true,
               disabled: acc.isActive || busy,
-              title: acc.isActive ? "Claude Desktop'ta açık olan hesap kaldırılamaz; önce başka bir hesaba geç." : undefined,
+              title: acc.isActive ? t("acc.removeActive") : undefined,
             },
           ]}
         />
@@ -183,13 +182,13 @@ export default function AccountsPage({
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-4 gap-3">
-        <StatCard label="Toplam hesap" value={accounts.length} icon={Users} tone="sky" />
-        <StatCard label="Açık hesap" value={active ? accountName(active).name : "—"} icon={CircleCheck} tone="green" small />
-        <StatCard label="Limite takılan" value={limited} icon={Clock} tone="amber" />
-        <StatCard label="Ortalama kalan kota" value={avgLeft === null ? "—" : `%${avgLeft}`} icon={Gauge} tone="white">
+        <StatCard label={t("acc.total")} value={accounts.length} icon={Users} tone="sky" />
+        <StatCard label={t("acc.open")} value={active ? accountName(active).name : "—"} icon={CircleCheck} tone="green" small />
+        <StatCard label={t("acc.limited")} value={limited} icon={Clock} tone="amber" />
+        <StatCard label={t("acc.avgLeft")} value={avgLeft === null ? "—" : pct(avgLeft)} icon={Gauge} tone="white">
           {avgLeft !== null && (
             <div className="min-w-0 max-w-[3.5rem] flex-1">
-              <Meter pct={100 - avgLeft} fill={avgLeft} label="Ortalama kalan kota" />
+              <Meter pct={100 - avgLeft} fill={avgLeft} label={t("acc.avgLeft")} />
             </div>
           )}
         </StatCard>
@@ -198,44 +197,36 @@ export default function AccountsPage({
       <Card>
         <div className="flex items-center justify-between gap-4 px-4 py-3">
           <p className="min-w-0 text-pretty text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-            Hesap değiştirince Claude Desktop birkaç saniyeliğine kapanıp açılır.{" "}
-            {selecting
-              ? "Onayladığın sohbetler diğer hesaplara kendiliğinden aktarılır, yenileri geçişte sorulur;"
-              : "Sohbetler tüm hesaplara kendiliğinden aktarılır;"}{" "}
-            yeni giriş yapılan hesaplar kendiliğinden kaydedilir.
+            {t("acc.info")} {selecting ? t("acc.infoAsk") : t("acc.infoAll")} {t("acc.infoNew")}
           </p>
           <div className="flex shrink-0 items-center gap-2">
             <Button onClick={onRefresh} disabled={usageBusy}>
               <RefreshCw className={`h-4 w-4 ${usageBusy ? "animate-spin" : ""}`} aria-hidden />
-              Limitleri yenile
+              {t("acc.refresh")}
             </Button>
             <Button variant="primary" onClick={onAdd} disabled={busy}>
               <Plus className="h-4 w-4" aria-hidden />
-              Yeni hesap ekle
+              {t("acc.add")}
             </Button>
           </div>
         </div>
         <div className="flex items-center justify-between gap-4 border-t border-zinc-100 dark:border-white/[0.06] px-4 py-2.5">
-          <span className="text-[13px] font-medium text-zinc-600 dark:text-zinc-400">Kota görünümü</span>
+          <span className="text-[13px] font-medium text-zinc-600 dark:text-zinc-400">{t("acc.quotaView")}</span>
           <Segmented
-            label="Gösterilecek kota"
+            label={t("acc.quotaViewLabel")}
             value={view}
             onChange={setView}
             options={[
-              { value: "both", label: "İkisi" },
-              { value: "five", label: "5 saatlik" },
-              { value: "week", label: "Haftalık" },
+              { value: "both", label: t("acc.viewBoth") },
+              { value: "five", label: t("quota.fiveHour") },
+              { value: "week", label: t("quota.weekly") },
             ]}
           />
         </div>
       </Card>
 
-      <section className="space-y-3" aria-label="Hesap listesi">
-        {accounts.length === 0 && (
-          <Card className="p-6 text-sm text-zinc-500 dark:text-zinc-400">
-            Henüz hesap yok. Claude Desktop'ta giriş yaptığın hesap burada otomatik görünür.
-          </Card>
-        )}
+      <section className="space-y-3" aria-label={t("acc.list")}>
+        {accounts.length === 0 && <Card className="p-6 text-sm text-zinc-500 dark:text-zinc-400">{t("acc.empty")}</Card>}
         {accounts.map((acc, i) => (
           <AccountRow
             key={acc.accountUuid}

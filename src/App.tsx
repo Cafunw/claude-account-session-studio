@@ -29,16 +29,18 @@ import SpendingPage from "./pages/Spending";
 import SwitchDialog from "./SwitchDialog";
 import UpdateBanner from "./UpdateBanner";
 import { useTheme } from "./theme";
+import { getLang, setLang, t } from "./i18n";
 
+// Label and subtitle come from the dictionary: `page.<id>` and `page.<id>.sub`.
 const PAGES = [
-  { id: "accounts", label: "Hesaplar", icon: Users, subtitle: "Claude hesaplarını yönet" },
-  { id: "history", label: "Kota geçmişi", icon: ChartLine, subtitle: "Hesapların kota kullanımı ve haftalık limit tahmini" },
-  { id: "spending", label: "Harcama", icon: Coins, subtitle: "Hangi proje ve sohbetlerin en çok token kullandığı" },
-  { id: "chats", label: "Sohbetler", icon: MessagesSquare, subtitle: "Sohbetlerin ve diğer hesaplara aktarımı" },
-  { id: "backups", label: "Yedekler", icon: Archive, subtitle: "Sohbet yedeklerini gör ve eksikleri geri yükle" },
-  { id: "health", label: "Sağlık", icon: HeartPulse, subtitle: "Sohbetleri ve yedekleri salt okunur kontrol et" },
-  { id: "journal", label: "İşlem günlüğü", icon: ScrollText, subtitle: "Son işlemleri ve hataları salt okunur gör" },
-  { id: "settings", label: "Ayarlar", icon: Settings, subtitle: "Görünüm, sohbet aktarımı ve bildirimler" },
+  { id: "accounts", icon: Users },
+  { id: "history", icon: ChartLine },
+  { id: "spending", icon: Coins },
+  { id: "chats", icon: MessagesSquare },
+  { id: "backups", icon: Archive },
+  { id: "health", icon: HeartPulse },
+  { id: "journal", icon: ScrollText },
+  { id: "settings", icon: Settings },
 ] as const;
 type PageId = (typeof PAGES)[number]["id"];
 
@@ -54,6 +56,13 @@ export default function App() {
   const [theme, setTheme] = useTheme();
   const [plan, setPlan] = useState<{ acc: AccountProfile; pending: PendingChat[] } | null>(null);
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
+  // Before the first payload the browser's language stands in.
+  if (data) setLang(data.effectiveLanguage);
+  const lang = getLang();
+  useEffect(() => {
+    document.documentElement.lang = lang;
+    document.title = t("app.title");
+  }, [lang]);
 
   const fetchState = async () => {
     try {
@@ -91,12 +100,12 @@ export default function App() {
         fetchState();
         setToast({
           type: "success",
-          message: "Yeni hesap algılandı. Claude Desktop kapandığında girişi otomatik kaydedilecek.",
+          message: t("toast.accountDetected"),
         });
       }),
       listen("account-saved", () => {
         fetchState();
-        setToast({ type: "success", message: "Yeni hesabın girişi kaydedildi." });
+        setToast({ type: "success", message: t("toast.accountSaved") });
       }),
     ];
     return () => {
@@ -116,9 +125,9 @@ export default function App() {
       const path = await invoke<string>("export_chat_markdown", { cliSessionId });
       setToast({
         type: "success",
-        message: `Kaydedildi: ${path.split(/[\\/]/).pop()}`,
+        message: t("toast.exported", { file: path.split(/[\\/]/).pop() ?? path }),
         action: {
-          label: "Klasörde göster",
+          label: t("toast.reveal"),
           run: () => invoke("reveal_in_explorer", { path }).catch((e) => setToast({ type: "error", message: String(e) })),
         },
       });
@@ -144,7 +153,7 @@ export default function App() {
     try {
       const r = await invoke<{ dashboard: FullDashboardPayload; notes: string[] }>("refresh_all_usage");
       setData(r.dashboard);
-      setToast({ type: "success", message: ["Limitler yenilendi", ...r.notes].join("\n") });
+      setToast({ type: "success", message: [t("toast.limitsRefreshed"), ...r.notes].join("\n") });
     } catch (e: any) {
       setToast({ type: "error", message: String(e) });
     } finally {
@@ -153,9 +162,9 @@ export default function App() {
   };
 
   const doSwitch = (acc: AccountProfile, extraChats: string[]) =>
-    runAction("Claude Desktop kapatılıyor...", async () => {
+    runAction(t("progress.closing"), async () => {
       setData(await invoke<FullDashboardPayload>("one_click_switch_account", { targetAccountUuid: acc.accountUuid, extraChats }));
-      setToast({ type: "success", message: `${accountName(acc).name} hesabına geçildi. Sohbetlerin hazır.` });
+      setToast({ type: "success", message: t("toast.switched", { name: accountName(acc).name }) });
     });
 
   // Uses only setters, so the first render's copy held by the event listener stays correct.
@@ -188,16 +197,16 @@ export default function App() {
   const handleRemove = async (acc: AccountProfile) => {
     try {
       setData(await invoke<FullDashboardPayload>("remove_account", { accountUuid: acc.accountUuid }));
-      setToast({ type: "success", message: `${accountName(acc).name} uygulamadan kaldırıldı. Sohbetlerin yerinde.` });
+      setToast({ type: "success", message: t("toast.removed", { name: accountName(acc).name }) });
     } catch (e: any) {
       setToast({ type: "error", message: String(e) });
     }
   };
 
   const handleAddAccount = () =>
-    runAction("Mevcut hesap kaydediliyor...", async () => {
+    runAction(t("progress.savingCurrent"), async () => {
       setData(await invoke<FullDashboardPayload>("one_click_start_new_account_login"));
-      setToast({ type: "success", message: "Claude Desktop'ta yeni hesapla giriş yap. Gerisi otomatik." });
+      setToast({ type: "success", message: t("toast.signInNew") });
     });
 
   const saveSelection = async (patch: Partial<Selection>) => {
@@ -228,6 +237,15 @@ export default function App() {
     }
   };
 
+  const handleLanguage = async (language: AutomationSettings["language"]) => {
+    try {
+      setData(await invoke<FullDashboardPayload>("set_language", { language }));
+      setHealth(null); // its problem texts came from the backend in the old language
+    } catch (e: any) {
+      setToast({ type: "error", message: String(e) });
+    }
+  };
+
   const handleNotifyOnReset = async (enabled: boolean) => {
     try {
       setData(await invoke<FullDashboardPayload>("set_notify_on_reset", { enabled }));
@@ -246,20 +264,21 @@ export default function App() {
   };
 
   const handleRestoreBackup = (backupId: string) =>
-    runAction("Yedek doğrulanıyor...", async () => {
+    runAction(t("progress.verifyingBackup"), async () => {
       const res = await invoke<any>("execute_safe_restore", { backupId });
       await fetchState();
       setToast({
         type: "success",
-        message: `${res.createdFiles} eksik sohbet geri yüklendi. Mevcut sohbetlere dokunulmadı.`,
+        message: t("toast.restored", { n: res.createdFiles }),
       });
     });
 
   const handleManualBackup = () =>
-    runAction("Yedek alınıyor...", async () => {
+    runAction(t("progress.backingUp"), async () => {
+      // Stored as data in this exact form: the backend keeps "manuel" backups out of pruning.
       await invoke("create_manual_backup", { reason: "Manuel yedek" });
       await fetchState();
-      setToast({ type: "success", message: "Yedek alındı ve doğrulandı." });
+      setToast({ type: "success", message: t("toast.backedUp") });
     });
 
   const handleHealthCheck = async () => {
@@ -289,23 +308,24 @@ export default function App() {
           </span>
           {!collapsed && (
             <div className="min-w-0 leading-tight">
-              <p className="truncate text-[15px] font-semibold">Claude Hesap</p>
-              <p className="truncate text-[13px] text-zinc-500 dark:text-zinc-400">Yöneticisi</p>
+              <p className="truncate text-[15px] font-semibold">{t("app.brand1")}</p>
+              <p className="truncate text-[13px] text-zinc-500 dark:text-zinc-400">{t("app.brand2")}</p>
             </div>
           )}
         </div>
 
-        <nav aria-label="Sayfalar" className="flex-1 space-y-1 px-2.5">
+        <nav aria-label={t("app.nav")} className="flex-1 space-y-1 px-2.5">
           {PAGES.map((p) => {
             const on = p.id === page;
+            const label = t(`page.${p.id}`);
             return (
               <button
                 key={p.id}
                 type="button"
                 onClick={() => setPage(p.id)}
                 aria-current={on ? "page" : undefined}
-                aria-label={collapsed ? p.label : undefined}
-                title={collapsed ? p.label : undefined}
+                aria-label={collapsed ? label : undefined}
+                title={collapsed ? label : undefined}
                 className={`flex w-full items-center gap-3 rounded-lg py-2.5 text-[15px] transition ${focusRing} ${
                   collapsed ? "justify-center" : "px-3"
                 } ${on ? "bg-sky-50 dark:bg-sky-400/10 font-medium text-sky-900 dark:text-sky-100 ring-1 ring-inset ring-sky-200 dark:ring-sky-400/25" : "text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-white/[0.05] hover:text-zinc-900 dark:hover:text-zinc-100"}`}
@@ -313,7 +333,7 @@ export default function App() {
                 <p.icon className={`h-[18px] w-[18px] shrink-0 ${on ? "text-sky-700 dark:text-sky-300" : "text-zinc-500 dark:text-zinc-400"}`} aria-hidden />
                 {!collapsed && (
                   <>
-                    <span className="flex-1 text-left">{p.label}</span>
+                    <span className="flex-1 text-left">{label}</span>
                     {counts[p.id] !== undefined && <span className="text-xs tabular-nums text-zinc-400">{counts[p.id]}</span>}
                   </>
                 )}
@@ -327,25 +347,25 @@ export default function App() {
             type="button"
             onClick={() => setCollapsed((c) => !c)}
             aria-expanded={!collapsed}
-            aria-label={collapsed ? "Kenar çubuğunu genişlet" : "Kenar çubuğunu daralt"}
-            title={collapsed ? "Kenar çubuğunu genişlet" : undefined}
+            aria-label={collapsed ? t("app.expand") : t("app.collapse")}
+            title={collapsed ? t("app.expand") : undefined}
             className={`flex w-full items-center gap-2 rounded-lg py-2 text-[13px] text-zinc-600 dark:text-zinc-400 transition hover:bg-zinc-50 dark:hover:bg-white/[0.05] ${focusRing} ${
               collapsed ? "justify-center" : "px-3"
             }`}
           >
             {collapsed ? <ChevronRight className="h-4 w-4" aria-hidden /> : <ChevronLeft className="h-4 w-4" aria-hidden />}
-            {!collapsed && "Kenar çubuğunu daralt"}
+            {!collapsed && t("app.collapse")}
           </button>
         </div>
         <div
           className={`flex items-center gap-3 border-t border-zinc-100 dark:border-white/[0.06] py-3.5 ${collapsed ? "justify-center" : "px-5"}`}
-          title={collapsed ? `Claude Desktop ${running ? "açık" : "kapalı"}` : undefined}
+          title={collapsed ? t(running ? "app.desktopOpen" : "app.desktopClosed") : undefined}
         >
           <span className={`h-2 w-2 shrink-0 rounded-full ${running ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-600"}`} aria-hidden />
           {!collapsed && (
             <div className="min-w-0 leading-tight">
-              <p className="truncate text-[13px] font-medium text-zinc-800 dark:text-zinc-200">Claude Desktop {running ? "açık" : "kapalı"}</p>
-              <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">son eşitleme: {data ? formatAgo(data.lastSyncAt) : "…"}</p>
+              <p className="truncate text-[13px] font-medium text-zinc-800 dark:text-zinc-200">{t(running ? "app.desktopOpen" : "app.desktopClosed")}</p>
+              <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">{t("app.lastSync", { ago: data ? formatAgo(data.lastSyncAt) : "…" })}</p>
             </div>
           )}
         </div>
@@ -358,9 +378,7 @@ export default function App() {
             <div role="alert" className="mb-6 flex gap-3 rounded-xl border border-rose-200 dark:border-rose-400/25 bg-rose-50 dark:bg-rose-500/10 px-4 py-3">
               <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-rose-600 dark:text-rose-400" aria-hidden />
               <div className="min-w-0">
-                <p className="text-sm font-medium text-rose-900 dark:text-rose-200">
-                  Claude Desktop'un dosya yapısı değişmiş görünüyor; sohbetlere dokunmamak için aktarım durduruldu.
-                </p>
+                <p className="text-sm font-medium text-rose-900 dark:text-rose-200">{t("app.formatWarning")}</p>
                 <p className="mt-1 text-xs text-rose-700 dark:text-rose-300">{data.formatWarning}</p>
               </div>
             </div>
@@ -379,8 +397,8 @@ export default function App() {
               <current.icon className="h-6 w-6" aria-hidden />
             </span>
             <div className="min-w-0">
-              <h1 className="text-[26px] font-semibold leading-tight tracking-tight">{current.label}</h1>
-              <p className="text-[15px] text-zinc-500 dark:text-zinc-400">{current.subtitle}</p>
+              <h1 className="text-[26px] font-semibold leading-tight tracking-tight">{t(`page.${current.id}`)}</h1>
+              <p className="text-[15px] text-zinc-500 dark:text-zinc-400">{t(`page.${current.id}.sub`)}</p>
             </div>
           </header>
 
@@ -424,6 +442,7 @@ export default function App() {
               data={data}
               theme={theme}
               onTheme={setTheme}
+              onLanguage={handleLanguage}
               onTransferMode={(transferMode: AutomationSettings["transferMode"]) => saveSelection({ transferMode })}
               onQuotaAlert={handleQuotaAlert}
               onAutoUpdate={async (enabled) => {
@@ -458,7 +477,7 @@ export default function App() {
           <div className="w-full max-w-sm rounded-2xl border border-zinc-200 dark:border-white/10 bg-white dark:bg-[#17181c] p-6 text-center shadow-xl" role="status">
             <Loader2 className="mx-auto h-6 w-6 animate-spin text-[#D97757]" aria-hidden />
             <p className="mt-4 text-sm font-medium text-zinc-900 dark:text-zinc-100">{progressStep}</p>
-            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Claude Desktop birazdan kendiliğinden açılacak.</p>
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{t("app.reopening")}</p>
           </div>
         </div>
       )}

@@ -1,6 +1,7 @@
 import { CircleAlert, CircleCheck, Loader2, Stethoscope } from "lucide-react";
 import { HealthReport } from "../types";
 import { Button, Card } from "../ui";
+import { backupReason, t } from "../i18n";
 
 export default function HealthPage({
   health,
@@ -23,21 +24,21 @@ export default function HealthPage({
             <CircleAlert className="h-4 w-4 text-rose-500" aria-hidden />
           ) : null}
           {busy
-            ? "Kontrol ediliyor..."
+            ? t("health.checking")
             : !health
-              ? "Yedeklerin doğrulanması biraz sürebilir. Hiçbir şey değiştirilmez."
+              ? t("health.idle")
               : health.items.length === 0
-                ? "Sorun yok"
-                : `${health.items.length} sorun bulundu`}
+                ? t("health.ok")
+                : t("health.found", { n: health.items.length })}
           {health && !busy && (
             <span className="text-xs text-zinc-400">
-              · {health.checkedChats} sohbet, {health.checkedBackups} yedek kontrol edildi
+              {t("health.checked", { chats: t("count.chats", { n: health.checkedChats }), backups: t("health.backups", { n: health.checkedBackups }) })}
             </span>
           )}
         </p>
         <Button variant="primary" onClick={onCheck} disabled={busy}>
           <Stethoscope className="h-4 w-4" aria-hidden />
-          {busy ? "Kontrol ediliyor..." : "Kontrol et"}
+          {busy ? t("health.checking") : t("health.check")}
         </Button>
       </Card>
 
@@ -47,7 +48,7 @@ export default function HealthPage({
             {health.items.map((it, i) => (
               <li key={i} className="px-4 py-3">
                 <p className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">
-                  {it.owner} · {it.subject}
+                  {it.kind === "backup" ? backupReason(it.owner) : it.owner} · {it.subject}
                 </p>
                 <p className="text-xs text-rose-600 dark:text-rose-400">{it.problem}</p>
               </li>

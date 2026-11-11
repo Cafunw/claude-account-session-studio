@@ -2,6 +2,7 @@
 //! silent (journaled at most once an hour); with auto-update off the app never contacts GitHub by itself.
 use crate::accounts::save_studio_config;
 use crate::backup::append_journal;
+use crate::i18n::t;
 use crate::{build_dashboard_state, AppState, FullDashboardPayload};
 use serde::Serialize;
 use std::time::{Duration, Instant};
@@ -61,7 +62,7 @@ async fn install(app: &AppHandle, update: Update) -> Result<(), String> {
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle) -> Result<UpdateInfo, String> {
     let current_version = app.package_info().version.to_string();
-    let found = fetch(&app).await.map_err(|e| format!("Güncelleme denetlenemedi: {e}"))?;
+    let found = fetch(&app).await.map_err(check_failed)?;
     Ok(UpdateInfo {
         available: found.is_some(),
         version: found.as_ref().map(|u| u.version.clone()),
@@ -72,10 +73,16 @@ pub async fn check_for_update(app: AppHandle) -> Result<UpdateInfo, String> {
 
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
-    match fetch(&app).await.map_err(|e| format!("Güncelleme denetlenemedi: {e}"))? {
-        Some(u) => install(&app, u).await.map_err(|e| format!("Güncelleme kurulamadı: {e}")),
-        None => Err("Yeni sürüm bulunamadı.".into()),
+    match fetch(&app).await.map_err(check_failed)? {
+        Some(u) => install(&app, u)
+            .await
+            .map_err(|e| t(format!("Güncelleme kurulamadı: {e}"), format!("Couldn't install the update: {e}"))),
+        None => Err(t("Yeni sürüm bulunamadı.", "No new version found.").into()),
     }
+}
+
+fn check_failed(e: impl std::fmt::Display) -> String {
+    t(format!("Güncelleme denetlenemedi: {e}"), format!("Couldn't check for updates: {e}"))
 }
 
 #[tauri::command(async)]
@@ -103,8 +110,12 @@ pub fn spawn(app: AppHandle) {
                     match decide(first, Some(&u.version), announced.as_deref()) {
                         Action::Install => install(&app, u).await,
                         Action::Announce => {
-                            let _ = app.notification().builder().title(format!("Yeni sürüm hazır: v{}", u.version))
-                                .body("Uygulamayı açıp \"Şimdi güncelle\"ye basabilirsin.").show();
+                            let _ = app
+                                .notification()
+                                .builder()
+                                .title(t(format!("Yeni sürüm hazır: v{}", u.version), format!("New version ready: v{}", u.version)))
+                                .body(t("Uygulamayı açıp \"Şimdi güncelle\"ye basabilirsin.", "Open the app and click \"Update now\"."))
+                                .show();
                             let _ = app.emit("update-available", serde_json::json!({ "version": u.version }));
                             announced = Some(u.version);
                             Ok(())

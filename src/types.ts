@@ -86,6 +86,8 @@ export interface AutomationSettings {
   hiddenAccounts: string[];
   /** User-chosen account order (uuids); the dashboard's `accounts` already follow it. */
   accountOrder: string[];
+  /** UI language setting; "auto" follows the Windows display language. */
+  language: "auto" | "tr" | "en";
 }
 
 export interface SidebarGroup {
@@ -145,6 +147,8 @@ export interface FullDashboardPayload {
   lastSyncAt: string | null;
   sidebarGroups: SidebarGroup[];
   formatWarning: string | null;
+  /** `automation.language` resolved by the backend. */
+  effectiveLanguage: "tr" | "en";
 }
 
 export interface HealthItem {

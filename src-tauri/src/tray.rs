@@ -2,6 +2,7 @@
 
 use crate::accounts::{display_name, AccountProfile, UsageMetrics};
 use crate::background::show_main_window;
+use crate::i18n::t;
 use crate::{perform_switch, switch_plan, AppState};
 use serde::Serialize;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -35,7 +36,10 @@ pub fn switch_to(app: &AppHandle, uuid: &str) {
     let payload = match perform_switch(app, &state, uuid, Vec::new()) {
         Ok(dash) => {
             let name = dash.accounts.iter().find(|a| a.account_uuid.eq_ignore_ascii_case(uuid)).map(display_name).unwrap_or_default();
-            SwitchFinished { ok: true, message: format!("{name} hesabına geçildi. Sohbetlerin hazır.") }
+            SwitchFinished {
+                ok: true,
+                message: t(format!("{name} hesabına geçildi. Sohbetlerin hazır."), format!("Switched to {name}. Your chats are ready.")),
+            }
         }
         Err(e) => SwitchFinished { ok: false, message: e },
     };
@@ -51,16 +55,16 @@ fn build_menu(app: &AppHandle, accounts: &[AccountProfile]) -> tauri::Result<Men
     if accounts.iter().any(|a| !a.is_active) {
         menu.append(&PredefinedMenuItem::separator(app)?)?;
     }
-    menu.append(&MenuItem::with_id(app, REFRESH_ID, "Limitleri yenile", true, None::<&str>)?)?;
-    menu.append(&MenuItem::with_id(app, "show", "Claude Hesap Yöneticisini Aç", true, None::<&str>)?)?;
-    menu.append(&MenuItem::with_id(app, "quit", "Çıkış", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, REFRESH_ID, t("Limitleri yenile", "Refresh limits"), true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "show", t("Claude Hesap Yöneticisini Aç", "Open Claude Account Manager"), true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "quit", t("Çıkış", "Quit"), true, None::<&str>)?)?;
     Ok(menu)
 }
 
 fn switch_label(name: &str, usage: &UsageMetrics) -> String {
     match fullest(usage) {
-        Some(p) => format!("{name} hesabına geç · %{p:.0}"),
-        None => format!("{name} hesabına geç · veri yok"),
+        Some(p) => t(format!("{name} hesabına geç · %{p:.0}"), format!("Switch to {name} · {p:.0}%")),
+        None => t(format!("{name} hesabına geç · veri yok"), format!("Switch to {name} · no data")),
     }
 }
 
@@ -71,7 +75,7 @@ pub fn refresh(app: &AppHandle, accounts: &[AccountProfile]) {
         let _ = tray.set_menu(Some(menu));
     }
     let active = accounts.iter().find(|a| a.is_active);
-    let name = active.map(display_name).unwrap_or_else(|| "hesap yok".to_string());
+    let name = active.map(display_name).unwrap_or_else(|| t("hesap yok", "no account").to_string());
     let usage = active.map(|a| &a.usage);
     let _ = tray.set_tooltip(Some(tooltip_text(&name, usage)));
 
@@ -103,10 +107,10 @@ fn tooltip_text(name: &str, usage: Option<&UsageMetrics>) -> String {
     let mut s = format!("Claude: {name}");
     if let Some(u) = usage {
         if let Some(w) = &u.seven_day {
-            s += &format!(" · haftalık %{:.0}", w.utilization);
+            s += &t(format!(" · haftalık %{:.0}", w.utilization), format!(" · weekly {:.0}%", w.utilization));
         }
         if let Some(w) = &u.five_hour {
-            s += &format!(" · 5 saatlik %{:.0}", w.utilization);
+            s += &t(format!(" · 5 saatlik %{:.0}", w.utilization), format!(" · 5-hour {:.0}%", w.utilization));
         }
     }
     s
@@ -159,15 +163,22 @@ mod tests {
 
     #[test]
     fn switch_label_shows_fuller_window() {
+        crate::i18n::set_test_lang(crate::i18n::Lang::Tr);
         assert_eq!(switch_label("ornek", &usage(Some(5.0), Some(23.0))), "ornek hesabına geç · %23");
         assert_eq!(switch_label("ornek", &usage(None, None)), "ornek hesabına geç · veri yok");
+        crate::i18n::set_test_lang(crate::i18n::Lang::En);
+        assert_eq!(switch_label("demo", &usage(Some(5.0), Some(23.0))), "Switch to demo · 23%");
+        assert_eq!(switch_label("demo", &usage(None, None)), "Switch to demo · no data");
     }
 
     #[test]
     fn tooltip_and_dot_pixels() {
+        crate::i18n::set_test_lang(crate::i18n::Lang::Tr);
         assert_eq!(tooltip_text("ornek", Some(&usage(None, Some(23.0)))), "Claude: ornek · haftalık %23");
         assert_eq!(tooltip_text("ornek", Some(&usage(Some(5.0), Some(23.0)))), "Claude: ornek · haftalık %23 · 5 saatlik %5");
         assert_eq!(tooltip_text("hesap yok", None), "Claude: hesap yok");
+        crate::i18n::set_test_lang(crate::i18n::Lang::En);
+        assert_eq!(tooltip_text("demo", Some(&usage(Some(5.0), Some(23.0)))), "Claude: demo · weekly 23% · 5-hour 5%");
         let base = Image::new_owned(vec![0; 32 * 32 * 4], 32, 32);
         let img = with_dot(&base, 3);
         let i = (25 * 32 + 25) * 4;
@@ -179,7 +190,7 @@ mod tests {
 pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&build_menu(app, &[])?)
-        .tooltip("Claude Hesap & Oturum Yöneticisi")
+        .tooltip(t("Claude Hesap & Oturum Yöneticisi", "Claude Account & Session Manager"))
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
             "quit" => app.exit(0),

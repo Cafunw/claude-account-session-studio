@@ -195,7 +195,7 @@ pub fn read_sidebar_groups(data_root: &Path, sessions: &[SessionRecord]) -> (Vec
         for g in scope.get("groups").and_then(|g| g.as_array()).into_iter().flatten() {
             let id = g.get("id").and_then(|v| v.as_str()).unwrap_or_default();
             if !id.is_empty() && !groups.iter().any(|x| x.id == id) {
-                let name = g.get("name").and_then(|v| v.as_str()).unwrap_or("Bölüm");
+                let name = g.get("name").and_then(|v| v.as_str()).unwrap_or(crate::i18n::t("Bölüm", "Section"));
                 groups.push(SidebarGroup { id: id.to_string(), name: name.to_string() });
             }
         }
@@ -999,7 +999,7 @@ fn execute_sync_inner(
     selection: Option<&SyncSelection>,
 ) -> Result<SyncExecutionResult, String> {
     if let Some(detail) = crate::format_guard::check(data_root) {
-        let msg = format!("{} {detail}", crate::format_guard::STOPPED);
+        let msg = format!("{} {detail}", crate::format_guard::stopped());
         // One entry per problem, not one per background tick.
         let last = crate::backup::read_journal(backup_storage_dir, 1);
         if !last.first().is_some_and(|j| j.operation == "format-guard" && j.details == msg) {

@@ -5,6 +5,7 @@
 
 use crate::accounts::{display_name, save_studio_config, AccountProfile, StoredStudioConfig};
 use crate::backup::append_journal;
+use crate::i18n::t;
 use crate::{build_dashboard_state, tray, AppState, FullDashboardPayload};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -63,14 +64,18 @@ pub(crate) fn unhide_signed_in(state: &AppState, cfg: &mut StoredStudioConfig, a
 
 fn removable<'a>(accounts: &'a [AccountProfile], uuid: &str) -> Result<&'a AccountProfile, String> {
     if !is_uuid(uuid) {
-        return Err("Geçersiz hesap kimliği.".to_string());
+        return Err(t("Geçersiz hesap kimliği.", "Invalid account ID.").to_string());
     }
     let acc = accounts
         .iter()
         .find(|a| a.account_uuid.eq_ignore_ascii_case(uuid))
-        .ok_or_else(|| "Hesap bulunamadı.".to_string())?;
+        .ok_or_else(|| t("Hesap bulunamadı.", "Account not found.").to_string())?;
     if acc.is_active {
-        return Err("Bu hesapla şu an Claude Desktop'ta giriş yapılmış; kaldırmak için önce başka bir hesaba geç.".to_string());
+        return Err(t(
+            "Bu hesapla şu an Claude Desktop'ta giriş yapılmış; kaldırmak için önce başka bir hesaba geç.",
+            "This account is signed in to Claude Desktop right now; switch to another account before removing it.",
+        )
+        .to_string());
     }
     Ok(acc)
 }
@@ -82,7 +87,10 @@ fn checked_child(base: &Path, name: &str) -> Result<Option<PathBuf>, String> {
     if fs::symlink_metadata(&target).is_err() {
         return Ok(None);
     }
-    let refuse = || format!("Güvenlik: {} uygulama klasörünün dışında, silinmedi.", target.display());
+    let refuse = || {
+        let p = target.display();
+        t(format!("Güvenlik: {p} uygulama klasörünün dışında, silinmedi."), format!("Safety: {p} is outside the app folder; not deleted."))
+    };
     let base = fs::canonicalize(base).map_err(|_| refuse())?;
     let real = fs::canonicalize(&target).map_err(|_| refuse())?;
     let same_name = real.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name));
@@ -95,15 +103,15 @@ fn checked_child(base: &Path, name: &str) -> Result<Option<PathBuf>, String> {
 /// Deletes the app's saved login slot and CLI credential copy for `uuid` (no backup: they are credentials).
 fn delete_app_copies(studio_dir: &Path, uuid: &str) -> Result<(), String> {
     if !is_uuid(uuid) {
-        return Err("Geçersiz hesap kimliği.".to_string());
+        return Err(t("Geçersiz hesap kimliği.", "Invalid account ID.").to_string());
     }
     let slot = checked_child(&studio_dir.join("slots"), uuid)?;
     let cred = checked_child(&studio_dir.join("credentials"), &format!("{uuid}.dpapi"))?;
     if let Some(slot) = slot {
-        fs::remove_dir_all(&slot).map_err(|e| format!("Giriş kopyası silinemedi: {e}"))?;
+        fs::remove_dir_all(&slot).map_err(|e| t(format!("Giriş kopyası silinemedi: {e}"), format!("Couldn't delete the saved login: {e}")))?;
     }
     if let Some(cred) = cred {
-        fs::remove_file(&cred).map_err(|e| format!("Kimlik kopyası silinemedi: {e}"))?;
+        fs::remove_file(&cred).map_err(|e| t(format!("Kimlik kopyası silinemedi: {e}"), format!("Couldn't delete the saved credentials: {e}")))?;
     }
     Ok(())
 }
@@ -158,7 +166,7 @@ pub fn move_account(
     let up = match direction.as_str() {
         "up" => true,
         "down" => false,
-        _ => return Err(format!("Bilinmeyen yön: {direction}")),
+        _ => return Err(t(format!("Bilinmeyen yön: {direction}"), format!("Unknown direction: {direction}"))),
     };
     let mut order: Vec<String> = build_dashboard_state(&state)
         .accounts
@@ -250,7 +258,10 @@ mod tests {
     #[test]
     fn active_account_cannot_be_removed() {
         let accounts = vec![acc(A, true), acc(B, false)];
+        crate::i18n::set_test_lang(crate::i18n::Lang::Tr);
         assert!(removable(&accounts, A).unwrap_err().contains("giriş yapılmış"));
+        crate::i18n::set_test_lang(crate::i18n::Lang::En);
+        assert!(removable(&accounts, A).unwrap_err().contains("signed in"));
         assert_eq!(removable(&accounts, &B.to_uppercase()).unwrap().account_uuid, B);
         assert!(removable(&accounts, C).is_err());
         assert!(removable(&accounts, "../x").is_err());

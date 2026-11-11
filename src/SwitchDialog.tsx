@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { PendingChat } from "./types";
 import { Button, formatDateShort } from "./ui";
+import { t } from "./i18n";
 
 const checkboxClass = "h-4 w-4 shrink-0 cursor-pointer rounded accent-[#D97757]";
 
@@ -66,10 +67,10 @@ export default function SwitchDialog({
       >
         <div className="px-5 pt-5">
           <h2 id="switch-dialog-title" className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-            {targetName} hesabına geçmeden önce
+            {t("switch.title", { name: targetName })}
           </h2>
           <p id="switch-dialog-text" className="mt-1.5 text-pretty text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
-            Bu sohbetler {targetName} hesabında yok. Aktarmak istediklerini seç. Daha önce aktarılanlar kendiliğinden eşitlenir.
+            {t("switch.text", { name: targetName })}
           </p>
           <label className="mt-4 flex cursor-pointer items-center gap-3 border-b border-zinc-100 pb-2.5 text-[13px] font-medium text-zinc-700 dark:border-white/[0.06] dark:text-zinc-300">
             <input
@@ -79,20 +80,20 @@ export default function SwitchDialog({
               onChange={() => setPicked(all ? new Set() : new Set(pending.map((p) => p.cliSessionId)))}
               className={checkboxClass}
             />
-            Tümünü seç
+            {t("switch.selectAll")}
             <span className="ml-auto text-xs font-normal tabular-nums text-zinc-500 dark:text-zinc-400">
               {picked.size}/{pending.length}
             </span>
           </label>
         </div>
-        <ul className="min-h-0 flex-1 divide-y divide-zinc-100 overflow-y-auto px-5 dark:divide-white/[0.06]" aria-label="Aktarılabilecek sohbetler">
+        <ul className="min-h-0 flex-1 divide-y divide-zinc-100 overflow-y-auto px-5 dark:divide-white/[0.06]" aria-label={t("switch.list")}>
           {pending.map((p) => (
             <li key={p.cliSessionId}>
               <label className="flex cursor-pointer items-center gap-3 py-2.5">
                 <input type="checkbox" checked={picked.has(p.cliSessionId)} onChange={() => toggle(p.cliSessionId)} className={checkboxClass} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm text-zinc-800 dark:text-zinc-200">{p.title}</span>
-                  <span className="block truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">{p.cwd || "klasör yok"}</span>
+                  <span className="block truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">{p.cwd || t("common.noFolder")}</span>
                 </span>
                 <span className="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{formatDateShort(p.lastActivityAt)}</span>
               </label>
@@ -101,11 +102,11 @@ export default function SwitchDialog({
         </ul>
         <div className="flex flex-wrap items-center justify-end gap-2 border-t border-zinc-100 px-5 py-4 dark:border-white/[0.06]">
           <Button variant="ghost" onClick={onCancel}>
-            Vazgeç
+            {t("common.cancel")}
           </Button>
-          <Button onClick={() => onConfirm([])}>Aktarmadan geç</Button>
+          <Button onClick={() => onConfirm([])}>{t("switch.skip")}</Button>
           <Button data-primary variant="primary" disabled={picked.size === 0} onClick={() => onConfirm([...picked])}>
-            Seçilenleri aktar ve geç
+            {t("switch.confirm")}
           </Button>
         </div>
       </div>

@@ -5,15 +5,22 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use crate::i18n::t;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 
-/// Prefix of the error `execute_sync` returns when the guard trips (callers match on it).
-pub const STOPPED: &str =
+/// Prefix of the error `execute_sync` returns when the guard trips (callers match on it), Turkish and English.
+const STOPPED_TR: &str =
     "Claude Desktop'un dosya yapısı değişmiş görünüyor; sohbetlere dokunmamak için aktarım durduruldu.";
+const STOPPED_EN: &str = "Claude Desktop's file layout seems to have changed; copying is stopped so your chats stay untouched.";
 
+pub fn stopped() -> &'static str {
+    t(STOPPED_TR, STOPPED_EN)
+}
+
+/// Either language: the language may change between the error and the check.
 pub fn is_guard_error(e: &str) -> bool {
-    e.starts_with(STOPPED)
+    e.starts_with(STOPPED_TR) || e.starts_with(STOPPED_EN)
 }
 
 // Thresholds: a few broken files are normal (Desktop mid-write, old crashes) and sync already skips
@@ -119,7 +126,11 @@ fn check_sessions(root: &Path) -> Option<String> {
     }
     if pointers.is_empty() {
         return (stray > 0).then(|| {
-            "Sohbet dosyaları beklenen klasör düzeninde değil (claude-code-sessions/<hesap>/<kuruluş>/local_*.json).".to_string()
+            t(
+                "Sohbet dosyaları beklenen klasör düzeninde değil (claude-code-sessions/<hesap>/<kuruluş>/local_*.json).",
+                "Chat files are not in the expected folder layout (claude-code-sessions/<account>/<org>/local_*.json).",
+            )
+            .to_string()
         });
     }
 
@@ -146,21 +157,19 @@ fn check_sessions(root: &Path) -> Option<String> {
     if !common.is_empty() {
         let mut keys: Vec<&str> = common.into_iter().collect();
         keys.sort();
-        return Some(format!(
-            "En yeni {} sohbet dosyasının hiçbirinde beklenen alan yok ya da türü değişmiş: {}.",
-            newest.len(),
-            keys.join(", ")
+        let (n, keys) = (newest.len(), keys.join(", "));
+        return Some(t(
+            format!("En yeni {n} sohbet dosyasının hiçbirinde beklenen alan yok ya da türü değişmiş: {keys}."),
+            format!("None of the {n} newest chat files has the expected fields, or their type changed: {keys}."),
         ));
     }
 
     let bad: Vec<_> = files.iter().filter(|f| !f.2.is_empty()).collect();
     (bad.len() >= MIN_FILES && bad.len() * 2 >= files.len()).then(|| {
-        format!(
-            "{}/{} sohbet dosyası beklenen biçimde değil (ör. {}: {}).",
-            bad.len(),
-            files.len(),
-            bad[0].1,
-            bad[0].2.join(", ")
+        let (b, n, name, keys) = (bad.len(), files.len(), &bad[0].1, bad[0].2.join(", "));
+        t(
+            format!("{b}/{n} sohbet dosyası beklenen biçimde değil (ör. {name}: {keys})."),
+            format!("{b}/{n} chat files are not in the expected format (e.g. {name}: {keys})."),
         )
     })
 }
@@ -170,7 +179,7 @@ fn check_config(data_root: &Path) -> Option<String> {
     // Unparseable usually means Desktop is mid-write; the sidebar merge refuses such a file anyway.
     let cfg: Value = serde_json::from_str(&raw).ok()?;
     if !cfg.is_object() {
-        return Some("claude_desktop_config.json artık bir JSON nesnesi değil.".to_string());
+        return Some(t("claude_desktop_config.json artık bir JSON nesnesi değil.", "claude_desktop_config.json is no longer a JSON object.").to_string());
     }
     let scopes = cfg.pointer("/preferences/epitaxyPrefs/dframe-group-scopes")?;
     let scope_ok = |s: &Value| {
@@ -184,7 +193,11 @@ fn check_config(data_root: &Path) -> Option<String> {
     };
     let ok = scopes.as_object().is_some_and(|m| m.values().all(scope_ok));
     (!ok).then(|| {
-        "claude_desktop_config.json içindeki kenar çubuğu bölümleri (dframe-group-scopes) beklenen biçimde değil.".to_string()
+        t(
+            "claude_desktop_config.json içindeki kenar çubuğu bölümleri (dframe-group-scopes) beklenen biçimde değil.",
+            "The sidebar sections (dframe-group-scopes) in claude_desktop_config.json are not in the expected format.",
+        )
+        .to_string()
     })
 }
 
@@ -197,7 +210,7 @@ pub fn spawn_alert(app: AppHandle) {
                 match check(&root) {
                     Some(detail) if !shown => {
                         shown = true;
-                        let _ = app.notification().builder().title("Sohbet aktarımı durduruldu").body(detail).show();
+                        let _ = app.notification().builder().title(t("Sohbet aktarımı durduruldu", "Chat copying stopped")).body(detail).show();
                     }
                     Some(_) => {}
                     None => shown = false,

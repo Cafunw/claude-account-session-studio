@@ -1,6 +1,7 @@
 //! Tells the user (once) when the active account's quota is nearly full. Never switches by itself:
 //! a switch closes Claude Desktop, which could interrupt work.
 use crate::accounts::{discover_accounts_in_root, display_name, AccountProfile, UsageMetrics};
+use crate::i18n::t;
 use crate::paths::discover_real_roots;
 use crate::AppState;
 use chrono::{DateTime, Utc};
@@ -17,7 +18,7 @@ fn parse(ts: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(ts).ok().map(|d| d.with_timezone(&Utc))
 }
 
-/// Returns the window ("5 saatlik"/"haftalık") and its utilization to announce, updating `notified`.
+/// Returns the window key ("5 saatlik"/"haftalık", see `window_label`) and its utilization to announce, updating `notified`.
 /// A window is announced once per crossing; it re-arms below threshold-10 or after its reset time.
 pub fn decide(
     notified: &mut HashSet<String>,
@@ -76,6 +77,14 @@ pub fn observe_resets(seen: &mut Seen, uuid: &str, usage: &UsageMetrics, now: Da
     out
 }
 
+/// The window keys above stay fixed (they key `notified`/`seen`); this is their wording.
+fn window_label(key: &str) -> &'static str {
+    match key {
+        "5 saatlik" => t("5 saatlik", "5-hour"),
+        _ => t("haftalık", "weekly"),
+    }
+}
+
 fn load(u: &UsageMetrics) -> f64 {
     let p = |w: &Option<crate::accounts::UsageWindow>| w.as_ref().map_or(0.0, |w| w.utilization);
     p(&u.five_hour).max(p(&u.seven_day))
@@ -87,10 +96,17 @@ pub fn message(active: &AccountProfile, window: &str, pct: f64, all: &[AccountPr
         .filter(|a| a.account_uuid != active.account_uuid && (a.usage.five_hour.is_some() || a.usage.seven_day.is_some()))
         .min_by(|a, b| load(&a.usage).total_cmp(&load(&b.usage)));
     let tip = match best {
-        Some(b) => format!("{} hesabına geçebilirsin (%{:.0} dolu).", display_name(b), load(&b.usage)),
-        None => "Uygulamadan başka bir hesaba geçebilirsin.".to_string(),
+        Some(b) => t(
+            format!("{} hesabına geçebilirsin (%{:.0} dolu).", display_name(b), load(&b.usage)),
+            format!("You can switch to {} ({:.0}% used).", display_name(b), load(&b.usage)),
+        ),
+        None => t("Uygulamadan başka bir hesaba geçebilirsin.", "You can switch to another account in the app.").to_string(),
     };
-    format!("{} {} limiti %{:.0}. {}", display_name(active), window, pct, tip)
+    let window = window_label(window);
+    t(
+        format!("{} {} limiti %{:.0}. {}", display_name(active), window, pct, tip),
+        format!("{}: {} limit at {:.0}%. {}", display_name(active), window, pct, tip),
+    )
 }
 
 pub fn spawn(app: AppHandle) {
@@ -126,8 +142,11 @@ pub fn spawn(app: AppHandle) {
                         let _ = app
                             .notification()
                             .builder()
-                            .title("Claude limiti yenilendi")
-                            .body(format!("{} hesabının {} limiti yenilendi", display_name(a), window))
+                            .title(t("Claude limiti yenilendi", "Claude limit reset"))
+                            .body(t(
+                                format!("{} hesabının {} limiti yenilendi", display_name(a), window_label(window)),
+                                format!("The {} limit of {} has reset", window_label(window), display_name(a)),
+                            ))
                             .show();
                     }
                 }
@@ -137,7 +156,7 @@ pub fn spawn(app: AppHandle) {
                 let _ = app
                     .notification()
                     .builder()
-                    .title("Claude kotası dolmak üzere")
+                    .title(t("Claude kotası dolmak üzere", "Claude quota almost full"))
                     .body(message(active, window, pct, &accounts))
                     .show();
             }
@@ -201,5 +220,24 @@ mod tests {
         // stale data is ignored
         let old = now - chrono::Duration::hours(7);
         assert_eq!(decide(&mut HashSet::new(), "b", &usage(99.0, 99.0, old), 90.0, now), None);
+    }
+
+    #[test]
+    fn message_in_both_languages() {
+        let acc = |uuid: &str, email: &str, week: f64| {
+            let mut a: AccountProfile = serde_json::from_value(serde_json::json!({
+                "id": "", "label": "", "email": email, "accountUuid": uuid, "orgUuid": "", "planType": "",
+                "rateLimitTier": "", "hasDpapiCredentials": false, "isActive": false, "sessionCount": 0,
+                "healthySessionCount": 0, "lastActivityAt": null, "usage": {"source": ""}, "addedAt": ""
+            }))
+            .unwrap();
+            a.usage = usage(10.0, week, Utc::now());
+            a
+        };
+        let all = [acc("a", "a@x.com", 92.0), acc("b", "b@x.com", 30.0)];
+        crate::i18n::set_test_lang(crate::i18n::Lang::Tr);
+        assert_eq!(message(&all[0], "haftalık", 92.0, &all), "a@x.com haftalık limiti %92. b@x.com hesabına geçebilirsin (%30 dolu).");
+        crate::i18n::set_test_lang(crate::i18n::Lang::En);
+        assert_eq!(message(&all[0], "haftalık", 92.0, &all), "a@x.com: weekly limit at 92%. You can switch to b@x.com (30% used).");
     }
 }

@@ -84,6 +84,9 @@ pub struct AccountProfile {
     pub added_at: String,
 }
 
+/// Plan placeholder (Turkish, English) when no login data names the plan; the UI hides both.
+pub const UNKNOWN_PLAN: (&str, &str) = ("Plan bilinmiyor", "Plan unknown");
+
 /// Name shown in the tray and notifications; same rule as accountName() in src/App.tsx.
 /// Desktop-only logins have no readable e-mail ("account-<id>@claude.ai").
 pub fn display_name(acc: &AccountProfile) -> String {
@@ -91,7 +94,8 @@ pub fn display_name(acc: &AccountProfile) -> String {
         return custom.to_string();
     }
     if acc.email.starts_with("account-") && acc.email.ends_with("@claude.ai") {
-        format!("Claude hesabı {}", acc.account_uuid.chars().take(8).collect::<String>())
+        let id = acc.account_uuid.chars().take(8).collect::<String>();
+        crate::i18n::t(format!("Claude hesabı {id}"), format!("Claude account {id}"))
     } else {
         acc.email.clone()
     }
@@ -146,10 +150,17 @@ pub struct AutomationSettings {
     /// User-chosen account order (uuids); unlisted accounts follow.
     #[serde(default)]
     pub account_order: Vec<String>,
+    /// UI language: "auto" (Windows display language), "tr" or "en".
+    #[serde(default = "default_language")]
+    pub language: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_language() -> String {
+    "auto".to_string()
 }
 
 fn default_transfer_mode() -> String {
@@ -176,6 +187,7 @@ impl Default for AutomationSettings {
             selected_targets: Default::default(),
             hidden_accounts: Vec::new(),
             account_order: Vec::new(),
+            language: default_language(),
         }
     }
 }
@@ -474,8 +486,9 @@ pub fn discover_accounts_in_root(
                     .map(|m| m.2.clone())
                     .filter(|s| s != "Claude Max / Pro")
                     .or_else(|| existing.map(|e| e.plan_type.clone()))
-                    .filter(|s| !s.is_empty() && s != "Claude Max / Pro")
-                    .unwrap_or_else(|| "Plan bilinmiyor".to_string());
+                    // The stored copy may hold the placeholder in the other language.
+                    .filter(|s| !s.is_empty() && s != "Claude Max / Pro" && s != UNKNOWN_PLAN.0 && s != UNKNOWN_PLAN.1)
+                    .unwrap_or_else(|| crate::i18n::t(UNKNOWN_PLAN.0, UNKNOWN_PLAN.1).to_string());
 
                 let rate_limit_tier = cli_meta
                     .map(|m| m.3.clone())
@@ -743,7 +756,10 @@ mod tests {
             r#"{"id":"","label":"","email":"account-x@claude.ai","accountUuid":"abcdef1234567890","orgUuid":"","planType":"","rateLimitTier":"","hasDpapiCredentials":false,"isActive":false,"sessionCount":0,"healthySessionCount":0,"lastActivityAt":null,"usage":{"source":""},"addedAt":""}"#,
         )
         .unwrap();
+        crate::i18n::set_test_lang(crate::i18n::Lang::Tr);
         assert_eq!(display_name(&acc), "Claude hesabı abcdef12");
+        crate::i18n::set_test_lang(crate::i18n::Lang::En);
+        assert_eq!(display_name(&acc), "Claude account abcdef12");
         acc.email = "a@b.com".into();
         assert_eq!(display_name(&acc), "a@b.com");
         acc.custom_label = Some("İş".into());
@@ -805,7 +821,9 @@ mod tests {
     fn old_config_without_transfer_mode_loads_as_ask() {
         let mut v = serde_json::to_value(AutomationSettings { transfer_mode: "all".into(), ..Default::default() }).unwrap();
         v.as_object_mut().unwrap().remove("transferMode").unwrap();
+        v.as_object_mut().unwrap().remove("language").unwrap();
         let a: AutomationSettings = serde_json::from_value(v).unwrap();
         assert_eq!(a.transfer_mode, "ask");
+        assert_eq!(a.language, "auto", "configs from before the language setting follow Windows");
     }
 }

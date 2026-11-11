@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { TrendingUp } from "lucide-react";
 import { AccountProfile, UsageHistory, UsageSample } from "../types";
 import { accountName, Avatar, Badge, Card, Segmented } from "../ui";
+import { isUnknownPlan, locale, pct, t } from "../i18n";
 
 const DAY = 86_400_000;
 // Categorical slots 1 and 3 of the dataviz reference palette, checked with its validator in both themes.
@@ -13,7 +14,7 @@ const PLOT = { l: 36, r: 12, t: 12, b: 26 };
 const PH = 190;
 
 const fmtTime = (t: number) =>
-  new Date(t).toLocaleString("tr-TR", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  new Date(t).toLocaleString(locale(), { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
 export default function UsageHistoryPage({ accounts, threshold }: { accounts: AccountProfile[]; threshold: number }) {
   const [days, setDays] = useState(7);
@@ -37,18 +38,12 @@ export default function UsageHistoryPage({ accounts, threshold }: { accounts: Ac
   return (
     <div className="space-y-4">
       <Card className="flex items-center justify-between gap-4 px-4 py-3">
-        <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          Kota okundukça kaydedilir; Claude Desktop'un kendi kayıtları da eklenir. Tahmin, son sıfırlanmadan bu yana haftalık kullanımın hızına göredir.
-        </p>
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">{t("hist.info")}</p>
         <Segmented
-          label="Zaman aralığı"
+          label={t("common.timeRange")}
           value={days}
           onChange={setDays}
-          options={[
-            { value: 7, label: "7 gün" },
-            { value: 14, label: "14 gün" },
-            { value: 30, label: "30 gün" },
-          ]}
+          options={[7, 14, 30].map((n) => ({ value: n, label: t("fmt.days", { n }) }))}
         />
       </Card>
 
@@ -58,7 +53,7 @@ export default function UsageHistoryPage({ accounts, threshold }: { accounts: Ac
         </p>
       )}
       {accounts.length === 0 && (
-        <Card className="py-8 text-center text-sm text-zinc-500 dark:text-zinc-400">Henüz hesap yok.</Card>
+        <Card className="py-8 text-center text-sm text-zinc-500 dark:text-zinc-400">{t("common.noAccounts")}</Card>
       )}
 
       {/* Refetch keeps the previous charts, dimmed, instead of a skeleton. */}
@@ -73,7 +68,7 @@ export default function UsageHistoryPage({ accounts, threshold }: { accounts: Ac
                 <div className="min-w-0 flex-1">
                   <p className="flex items-center gap-2 truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
                     <span className="truncate">{name}</span>
-                    {acc.planType !== "Plan bilinmiyor" && <Badge>{acc.planType}</Badge>}
+                    {!isUnknownPlan(acc.planType) && <Badge>{acc.planType}</Badge>}
                   </p>
                   {hint && <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">{hint}</p>}
                 </div>
@@ -83,8 +78,8 @@ export default function UsageHistoryPage({ accounts, threshold }: { accounts: Ac
                 <div className="h-[216px] animate-pulse rounded-lg bg-zinc-100 dark:bg-white/[0.04]" />
               ) : h.samples.length === 0 ? (
                 <div className="flex h-[140px] flex-col items-center justify-center rounded-lg border border-dashed border-zinc-200 text-center dark:border-white/10">
-                  <p className="text-sm text-zinc-600 dark:text-zinc-300">Bu aralıkta kota kaydı yok.</p>
-                  <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Uygulama açıkken bu hesabın kotası okundukça geçmiş birikir.</p>
+                  <p className="text-sm text-zinc-600 dark:text-zinc-300">{t("hist.noData")}</p>
+                  <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{t("hist.noDataHint")}</p>
                 </div>
               ) : (
                 <>
@@ -116,13 +111,13 @@ function Legend({ samples }: { samples: UsageSample[] }) {
       <svg width="14" height="4" aria-hidden>
         <line x1="1" y1="2" x2="13" y2="2" strokeWidth="2" strokeLinecap="round" className={cls} />
       </svg>
-      {label} <span className="font-medium tabular-nums text-zinc-900 dark:text-zinc-100">%{v!.toFixed(0)}</span>
+      {label} <span className="font-medium tabular-nums text-zinc-900 dark:text-zinc-100">{pct(v!)}</span>
     </span>
   );
   return (
     <div className="flex shrink-0 items-center gap-4 text-xs text-zinc-500 dark:text-zinc-400">
-      {sd != null && item(WEEKLY, "Haftalık", sd)}
-      {fh != null && item(FIVE_H, "5 saatlik", fh)}
+      {sd != null && item(WEEKLY, t("quota.weekly"), sd)}
+      {fh != null && item(FIVE_H, t("quota.fiveHour"), fh)}
     </div>
   );
 }
@@ -170,7 +165,7 @@ function Chart({ h, days, threshold, label }: { h: UsageHistory; days: number; t
         className="block h-auto w-full touch-none select-none rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97757]/70"
         role="img"
         tabIndex={0}
-        aria-label={`${label}: son ${days} günün kota grafiği${sd != null ? `, haftalık şu an %${sd.toFixed(0)}` : ""}. Sol ve sağ ok tuşlarıyla noktalar arasında gezin.`}
+        aria-label={t("hist.chartLabel", { name: label, days, now: sd != null ? t("hist.chartNow", { n: Math.round(sd) }) : "" })}
         onPointerMove={(e) => setHover(nearest(e.clientX))}
         onPointerLeave={() => setHover(null)}
         onKeyDown={onKey}
@@ -186,21 +181,21 @@ function Chart({ h, days, threshold, label }: { h: UsageHistory; days: number; t
         ))}
         {ticks.map((t) => (
           <text key={t} x={x(t)} y={H - 8} textAnchor="middle" className="fill-zinc-400 text-[10px] dark:fill-zinc-500">
-            {new Date(t).toLocaleDateString("tr-TR", { day: "numeric", month: "short" })}
+            {new Date(t).toLocaleDateString(locale(), { day: "numeric", month: "short" })}
           </text>
         ))}
-        {h.resets.map((t) => (
-          <g key={t}>
-            <line x1={x(t)} x2={x(t)} y1={PLOT.t} y2={PLOT.t + PH} className="stroke-zinc-300 dark:stroke-white/20" strokeWidth={1} />
+        {h.resets.map((at) => (
+          <g key={at}>
+            <line x1={x(at)} x2={x(at)} y1={PLOT.t} y2={PLOT.t + PH} className="stroke-zinc-300 dark:stroke-white/20" strokeWidth={1} />
             {/* Near the right edge the label goes left of the line, clear of the threshold label. */}
-            <text x={x(t) > W - 140 ? x(t) - 4 : x(t) + 4} textAnchor={x(t) > W - 140 ? "end" : "start"} y={PLOT.t + 9} className="fill-zinc-400 text-[10px] dark:fill-zinc-500">
-              sıfırlandı
+            <text x={x(at) > W - 140 ? x(at) - 4 : x(at) + 4} textAnchor={x(at) > W - 140 ? "end" : "start"} y={PLOT.t + 9} className="fill-zinc-400 text-[10px] dark:fill-zinc-500">
+              {t("hist.reset")}
             </text>
           </g>
         ))}
         <line x1={PLOT.l} x2={W - PLOT.r} y1={y(threshold)} y2={y(threshold)} className="stroke-rose-400/80 dark:stroke-rose-400/60" strokeWidth={1} />
         <text x={W - PLOT.r} y={y(threshold) - 4} textAnchor="end" className="fill-zinc-500 text-[10px] dark:fill-zinc-400">
-          uyarı %{threshold}
+          {t("hist.alert", { n: threshold })}
         </text>
         {hasFh && <path d={path("fh")} fill="none" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" className={FIVE_H} />}
         <path d={path("sd")} fill="none" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" className={WEEKLY} />
@@ -223,8 +218,8 @@ function Chart({ h, days, threshold, label }: { h: UsageHistory; days: number; t
           role="status"
         >
           <p className="mb-1 text-zinc-500 dark:text-zinc-400">{fmtTime(hp.t)}</p>
-          {hp.sd != null && <TipRow cls={WEEKLY} label="Haftalık" v={hp.sd} />}
-          {hp.fh != null && <TipRow cls={FIVE_H} label="5 saatlik" v={hp.fh} />}
+          {hp.sd != null && <TipRow cls={WEEKLY} label={t("quota.weekly")} v={hp.sd} />}
+          {hp.fh != null && <TipRow cls={FIVE_H} label={t("quota.fiveHour")} v={hp.fh} />}
         </div>
       )}
     </div>
@@ -237,7 +232,7 @@ function TipRow({ cls, label, v }: { cls: string; label: string; v: number }) {
       <svg width="10" height="4" aria-hidden>
         <line x1="1" y1="2" x2="9" y2="2" strokeWidth="2" strokeLinecap="round" className={cls} />
       </svg>
-      <span className="font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">%{v.toFixed(0)}</span>
+      <span className="font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">{pct(v)}</span>
       <span className="text-zinc-500 dark:text-zinc-400">{label}</span>
     </p>
   );

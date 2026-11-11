@@ -17,6 +17,7 @@ pub mod dpapi;
 pub mod format_guard;
 pub mod fs_watch;
 pub mod health;
+pub mod i18n;
 pub mod journal;
 pub mod paths;
 pub mod quota_alert;
@@ -75,8 +76,14 @@ pub struct FullDashboardPayload {
     pub backups: Vec<BackupManifest>,
     pub last_sync_at: Option<String>,
     pub sidebar_groups: Vec<SidebarGroup>,
-    /// Set while `format_guard` blocks all writes (Turkish detail for the banner).
+    /// Set while `format_guard` blocks all writes (detail for the banner, in the UI language).
     pub format_warning: Option<String>,
+    /// "tr" | "en": `automation.language` resolved ("auto" follows Windows).
+    pub effective_language: String,
+}
+
+fn no_desktop_data() -> String {
+    i18n::t("Claude Desktop veri klasörü bulunamadı.", "Claude Desktop's data folder was not found.").to_string()
 }
 
 fn emit_progress(app: &AppHandle, step: &str) {
@@ -193,6 +200,7 @@ fn build_dashboard_state_ex(state: &AppState, force: bool, failed: &mut Vec<Stri
         last_sync_at: cfg.last_sync_at,
         sidebar_groups,
         format_warning: format_guard::check(&active_data_root_path),
+        effective_language: i18n::lang().code().to_string(),
     }
 }
 
@@ -230,7 +238,7 @@ fn get_usage_history(state: State<'_, AppState>, account_uuid: String, days: u32
         .iter()
         .find(|a| a.account_uuid.eq_ignore_ascii_case(&account_uuid))
         .cloned()
-        .ok_or("Hesap bulunamadı")?;
+        .ok_or_else(|| i18n::t("Hesap bulunamadı", "Account not found").to_string())?;
     let data_root = discover_real_roots()
         .first()
         .map(|r| PathBuf::from(&r.path))
@@ -247,13 +255,14 @@ struct UsageRefreshResult {
     notes: Vec<String>,
 }
 
-fn age_tr(iso: &str) -> Option<String> {
+fn age_text(iso: &str) -> Option<String> {
     let t = chrono::DateTime::parse_from_rfc3339(iso).ok()?;
     let mins = chrono::Utc::now().signed_duration_since(t).num_minutes().max(1);
+    let plural = |n: i64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     Some(match mins {
-        m if m < 60 => format!("{m} dakika"),
-        m if m < 1440 => format!("{} saat", m / 60),
-        m => format!("{} gün", m / 1440),
+        m if m < 60 => i18n::t(format!("{m} dakika"), plural(m, "minute", "minutes")),
+        m if m < 1440 => i18n::t(format!("{} saat", m / 60), plural(m / 60, "hour", "hours")),
+        m => i18n::t(format!("{} gün", m / 1440), plural(m / 1440, "day", "days")),
     })
 }
 
@@ -265,16 +274,27 @@ fn refresh_all_usage(app: AppHandle, state: State<'_, AppState>) -> Result<Usage
     tray::refresh(&app, &dashboard.accounts);
     let mut notes: Vec<String> = failed
         .iter()
-        .map(|n| format!("{n}: anlık veri alınamadı (giriş süresi dolmuş olabilir)"))
+        .map(|n| {
+            i18n::t(
+                format!("{n}: anlık veri alınamadı (giriş süresi dolmuş olabilir)"),
+                format!("{n}: couldn't get live data (the login may have expired)"),
+            )
+        })
         .collect();
     for acc in dashboard.accounts.iter().filter(|a| !a.has_dpapi_credentials) {
         let name = crate::accounts::display_name(acc);
         let age = (acc.usage.source == "desktop-history")
-            .then(|| acc.usage.fetched_at.as_deref().and_then(age_tr))
+            .then(|| acc.usage.fetched_at.as_deref().and_then(age_text))
             .flatten();
         notes.push(match age {
-            Some(age) => format!("{name}: anlık veri yok, Claude Desktop'un {age} önceki kaydı gösteriliyor"),
-            None => format!("{name}: anlık veri yok, Claude Desktop'ta da kaydı yok"),
+            Some(age) => i18n::t(
+                format!("{name}: anlık veri yok, Claude Desktop'un {age} önceki kaydı gösteriliyor"),
+                format!("{name}: no live data, showing Claude Desktop's record from {age} ago"),
+            ),
+            None => i18n::t(
+                format!("{name}: anlık veri yok, Claude Desktop'ta da kaydı yok"),
+                format!("{name}: no live data, and Claude Desktop has no record either"),
+            ),
         });
     }
     Ok(UsageRefreshResult { dashboard, notes })
@@ -365,7 +385,7 @@ pub(crate) fn perform_switch(
     }
     let dash = build_dashboard_state(state);
     let Some(active_root) = dash.environment.active_data_root else {
-        return Err("Claude Desktop veri klasörü bulunamadı.".to_string());
+        return Err(no_desktop_data());
     };
     let data_root = PathBuf::from(&active_root.path);
     let projects_dir = PathBuf::from(&dash.environment.cli_projects_dir);
@@ -374,7 +394,7 @@ pub(crate) fn perform_switch(
         .accounts
         .iter()
         .find(|a| a.account_uuid.eq_ignore_ascii_case(&target_account_uuid))
-        .ok_or_else(|| "Hedef hesap bulunamadı.".to_string())?
+        .ok_or_else(|| i18n::t("Hedef hesap bulunamadı.", "Target account not found.").to_string())?
         .clone();
 
     let outgoing_uuid = read_last_known_account(&data_root.join("config.json"))
@@ -382,11 +402,11 @@ pub(crate) fn perform_switch(
         .unwrap_or_default();
 
     // Step 1: Close Claude Desktop automatically
-    emit_progress(&app, "1/5 — Claude Desktop otomatik kapatılıyor...");
+    emit_progress(&app, i18n::t("1/5 — Claude Desktop otomatik kapatılıyor...", "1/5 — Closing Claude Desktop..."));
     let _ = close_claude_desktop_and_wait(&data_root, Duration::from_secs(6))?;
 
     // Step 2: Capture outgoing account's Desktop cookies/storage & CLI credentials
-    emit_progress(&app, "2/5 — Mevcut hesap oturumu kaydediliyor...");
+    emit_progress(&app, i18n::t("2/5 — Mevcut hesap oturumu kaydediliyor...", "2/5 — Saving the current account's session..."));
     if !outgoing_uuid.is_empty() {
         let _ = capture_active_account_state(&data_root, &state.studio_dir, &outgoing_uuid);
     }
@@ -401,7 +421,10 @@ pub(crate) fn perform_switch(
     // Step 3: Copy missing chats across accounts (never sidebar groups)
     emit_progress(
         &app,
-        "3/5 — Tüm sohbetler ve proje klasörleri yeni hesaba aktarılıyor...",
+        i18n::t(
+            "3/5 — Tüm sohbetler ve proje klasörleri yeni hesaba aktarılıyor...",
+            "3/5 — Copying chats and project folders to the new account...",
+        ),
     );
     // A changed Desktop format skips only this step (already journaled), the switch still happens.
     if let Err(e) = execute_sync(
@@ -417,13 +440,22 @@ pub(crate) fn perform_switch(
         if !format_guard::is_guard_error(&e) {
             return Err(e);
         }
-        emit_progress(&app, "3/5 — Dosya yapısı değişmiş görünüyor; sohbet aktarımı atlandı.");
+        emit_progress(
+            &app,
+            i18n::t(
+                "3/5 — Dosya yapısı değişmiş görünüyor; sohbet aktarımı atlandı.",
+                "3/5 — The file layout seems to have changed; skipped copying chats.",
+            ),
+        );
     }
 
     // Step 4: Restore target account's Desktop & CLI state
     emit_progress(
         &app,
-        &format!("4/5 — '{}' hesabı aktif ediliyor...", target_acc.label),
+        &i18n::t(
+            format!("4/5 — '{}' hesabı aktif ediliyor...", target_acc.label),
+            format!("4/5 — Activating '{}'...", target_acc.label),
+        ),
     );
     let _ = restore_target_account_state(&data_root, &state.studio_dir, &target_acc.account_uuid)?;
 
@@ -451,7 +483,7 @@ pub(crate) fn perform_switch(
     );
 
     // Step 5: Relaunch Claude Desktop automatically
-    emit_progress(&app, "5/5 — Claude Desktop yeniden açılıyor...");
+    emit_progress(&app, i18n::t("5/5 — Claude Desktop yeniden açılıyor...", "5/5 — Reopening Claude Desktop..."));
     let _ = launch_claude_desktop();
 
     let dash = build_dashboard_state(state);
@@ -473,7 +505,7 @@ fn one_click_start_new_account_login(
     let _op = state.op_lock.lock().unwrap_or_else(|e| e.into_inner());
     let dash = build_dashboard_state(&state);
     let Some(active_root) = dash.environment.active_data_root else {
-        return Err("Claude Desktop veri klasörü bulunamadı.".to_string());
+        return Err(no_desktop_data());
     };
     let data_root = PathBuf::from(&active_root.path);
 
@@ -481,10 +513,10 @@ fn one_click_start_new_account_login(
         .or_else(|| dash.accounts.iter().find(|a| a.is_active).map(|a| a.account_uuid.clone()))
         .unwrap_or_default();
 
-    emit_progress(&app, "1/4 — Claude Desktop kapatılıyor...");
+    emit_progress(&app, i18n::t("1/4 — Claude Desktop kapatılıyor...", "1/4 — Closing Claude Desktop..."));
     let _ = close_claude_desktop_and_wait(&data_root, Duration::from_secs(6))?;
 
-    emit_progress(&app, "2/4 — Mevcut hesabınız güvenle kaydediliyor...");
+    emit_progress(&app, i18n::t("2/4 — Mevcut hesabınız güvenle kaydediliyor...", "2/4 — Saving your current account..."));
     let _ = create_verified_backup(
         &data_root,
         &state.backup_storage_dir,
@@ -495,10 +527,10 @@ fn one_click_start_new_account_login(
         let _ = capture_active_account_state(&data_root, &state.studio_dir, &outgoing_uuid);
     }
 
-    emit_progress(&app, "3/4 — Yeni hesap girişi hazırlanıyor...");
+    emit_progress(&app, i18n::t("3/4 — Yeni hesap girişi hazırlanıyor...", "3/4 — Preparing the new account sign-in..."));
     clear_main_desktop_session_for_new_login(&data_root)?;
 
-    emit_progress(&app, "4/4 — Claude Desktop giriş ekranı açılıyor...");
+    emit_progress(&app, i18n::t("4/4 — Claude Desktop giriş ekranı açılıyor...", "4/4 — Opening the Claude Desktop sign-in screen..."));
     let _ = launch_claude_desktop();
 
     append_journal(
@@ -525,7 +557,7 @@ fn set_sync_selection(
 ) -> Result<FullDashboardPayload, String> {
     {
         if mode != "ask" && mode != "all" {
-            return Err(format!("Bilinmeyen aktarım modu: {mode}"));
+            return Err(i18n::t(format!("Bilinmeyen aktarım modu: {mode}"), format!("Unknown transfer mode: {mode}")));
         }
         let mut cfg = state.config.lock().unwrap();
         cfg.automation.transfer_mode = mode;
@@ -548,6 +580,23 @@ fn update_preferences(quota_alert_percent: f64, state: State<'_, AppState>) -> R
         save_studio_config(&state.studio_dir, &cfg)?;
     }
     Ok(build_dashboard_state(&state))
+}
+
+/// "auto" | "tr" | "en"; takes effect at once for the tray and every later backend string.
+#[tauri::command(async)]
+fn set_language(language: String, app: AppHandle, state: State<'_, AppState>) -> Result<FullDashboardPayload, String> {
+    if !matches!(language.as_str(), "auto" | "tr" | "en") {
+        return Err(i18n::t(format!("Bilinmeyen dil: {language}"), format!("Unknown language: {language}")));
+    }
+    {
+        let mut cfg = state.config.lock().unwrap();
+        cfg.automation.language = language;
+        save_studio_config(&state.studio_dir, &cfg)?;
+        i18n::apply(&cfg.automation.language);
+    }
+    let dash = build_dashboard_state(&state);
+    tray::refresh(&app, &dash.accounts);
+    Ok(dash)
 }
 
 /// Turns the "limit reset" notification on or off.
@@ -575,7 +624,7 @@ fn rename_account(
             .accounts
             .iter_mut()
             .find(|a| a.account_uuid.eq_ignore_ascii_case(&account_uuid))
-            .ok_or_else(|| "Hesap bulunamadı.".to_string())?;
+            .ok_or_else(|| i18n::t("Hesap bulunamadı.", "Account not found.").to_string())?;
         let clean = label.trim();
         acc.custom_label = (!clean.is_empty()).then(|| clean.to_string());
         save_studio_config(&state.studio_dir, &cfg)?;
@@ -592,7 +641,7 @@ fn create_manual_backup(
 ) -> Result<BackupManifest, String> {
     let dash = build_dashboard_state(&state);
     let Some(active_root) = dash.environment.active_data_root else {
-        return Err("Veri klasörü bulunamadı.".to_string());
+        return Err(i18n::t("Veri klasörü bulunamadı.", "Data folder not found.").to_string());
     };
     let clean_reason = if reason.trim().is_empty() {
         "Manuel Yedek".to_string()
@@ -614,7 +663,7 @@ fn execute_safe_restore(
 ) -> Result<RestoreResult, String> {
     let dash = build_dashboard_state(&state);
     let Some(active_root) = dash.environment.active_data_root else {
-        return Err("Veri klasörü bulunamadı.".to_string());
+        return Err(i18n::t("Veri klasörü bulunamadı.", "Data folder not found.").to_string());
     };
     execute_restore(
         &state.backup_storage_dir,
@@ -771,6 +820,7 @@ pub fn run() {
     let _ = fs::create_dir_all(&backup_storage_dir);
 
     let cfg = load_studio_config(&studio_dir);
+    i18n::apply(&cfg.automation.language);
 
     let app_state = AppState {
         studio_dir,
@@ -834,6 +884,7 @@ pub fn run() {
             updater::install_update,
             updater::set_auto_update,
             set_notify_on_reset,
+            set_language,
             create_manual_backup,
             execute_safe_restore,
         ])

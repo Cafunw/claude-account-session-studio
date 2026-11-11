@@ -8,6 +8,10 @@ const now = Date.now();
 const iso = (msFromNow: number) => new Date(now + msFromNow).toISOString();
 const H = 3_600_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// Strings the real backend words in the UI language ("auto" here follows the browser, as Windows does there).
+const eff = (): "tr" | "en" =>
+  state.automation.language === "auto" ? (navigator.language.toLowerCase().startsWith("tr") ? "tr" : "en") : state.automation.language;
+const L = (tr: string, en: string) => (eff() === "tr" ? tr : en);
 
 const U1 = "11111111-aaaa-4aaa-8aaa-000000000001";
 const U2 = "22222222-bbbb-4bbb-8bbb-000000000002";
@@ -81,6 +85,7 @@ const state: FullDashboardPayload = {
     selectedTargets: { "group:grp-1": [U2] },
     hiddenAccounts: [],
     accountOrder: [],
+    language: "auto",
   },
   accounts: [
     account({
@@ -113,7 +118,7 @@ const state: FullDashboardPayload = {
         extraUsage: null,
         fetchedAt: iso(-2 * H),
         source: "desktop-history",
-        rateLimitNotice: "Haftalık limitin dolmak üzere.",
+        rateLimitNotice: "Rate limited",
       },
     }),
     account({ accountUuid: U3, email: "account-7f3a9c21@claude.ai" }),
@@ -133,26 +138,28 @@ const state: FullDashboardPayload = {
     chat("Eski içe aktarılmış sohbet", null),
   ],
   backups: [
-    { id: "b3", createdAt: iso(-1.5 * H), reason: "Hesap değişiminden önce", sourceRoot: "", backupDir: "", totalFiles: 48, totalBytes: 0, allVerified: true, files: [] },
+    // Reasons as the backend really stores them (a mix of English and Turkish).
+    { id: "b3", createdAt: iso(-1.5 * H), reason: "Pre-sync verified snapshot (2 new, 0 conflict-companions, 0 metadata refreshes)", sourceRoot: "", backupDir: "", totalFiles: 48, totalBytes: 0, allVerified: true, files: [] },
     { id: "b2", createdAt: iso(-26 * H), reason: "Manuel yedek", sourceRoot: "", backupDir: "", totalFiles: 45, totalBytes: 0, allVerified: true, files: [] },
-    { id: "b1", createdAt: iso(-5 * 24 * H), reason: "Geri yüklemeden önce", sourceRoot: "", backupDir: "", totalFiles: 39, totalBytes: 0, allVerified: false, files: [] },
+    { id: "b1", createdAt: iso(-5 * 24 * H), reason: "Yeni hesap ekleme öncesi otomatik yedek", sourceRoot: "", backupDir: "", totalFiles: 39, totalBytes: 0, allVerified: false, files: [] },
   ],
   lastSyncAt: iso(-3 * 60_000),
   sidebarGroups: [{ id: "grp-1", name: "Müşteri işleri" }],
   // Open the preview with ?uyari to see the format-warning banner.
-  formatWarning: location.search.includes("uyari") ? "Örnek: beklenmeyen alan 'sessionsV3' bulundu." : null,
+  formatWarning: null, // set per language in snap()
+  effectiveLanguage: "tr",
 };
 
-const health: HealthReport = {
+const health = (): HealthReport => ({
   checkedChats: 30,
   checkedBackups: 3,
   chatProblems: 1,
   backupProblems: 1,
   items: [
-    { kind: "chat", owner: "İş hesabı", subject: "Eski içe aktarılmış sohbet", problem: "Sohbet kaydı diskte bulunamadı." },
-    { kind: "backup", owner: "Yedek", subject: "Geri yüklemeden önce", problem: "1 dosyanın özeti tutmuyor." },
+    { kind: "chat", owner: "İş hesabı", subject: "Eski içe aktarılmış sohbet", problem: L("Sohbetin kayıt dosyası (.jsonl) diskte bulunamadı.", "The chat's transcript file (.jsonl) is missing from disk.") },
+    { kind: "backup", owner: "Yeni hesap ekleme öncesi otomatik yedek", subject: "backup-20250110-093000-c3d4e5", problem: L("Yedek doğrulaması başarısız: SHA-256 tutmuyor", "Backup verification failed: SHA-256 mismatch") },
   ],
-};
+});
 
 // Chats the second account lacks: clicking "Geç" on it opens the switch dialog.
 const pending: PendingChat[] = [
@@ -161,11 +168,18 @@ const pending: PendingChat[] = [
   { cliSessionId: "cli-mock-10", sessionId: "local_mock10", title: "Excel formülü", cwd: null, lastActivityAt: now - 50 * H, sourceAccountUuid: U1 },
 ];
 
-const snap = () => structuredClone(state);
+const snap = () => {
+  const s = structuredClone(state);
+  s.effectiveLanguage = eff();
+  // Open the preview with ?uyari to see the format-warning banner.
+  if (location.search.includes("uyari"))
+    s.formatWarning = L("Örnek: En yeni 5 sohbet dosyasının hiçbirinde beklenen alan yok ya da türü değişmiş: sessionId.", "Example: None of the 5 newest chat files has the expected fields, or their type changed: sessionId.");
+  return s;
+};
 
 // 14 days of hourly-ish samples: a weekly sawtooth that resets once, a 5-hour wave; U3 has none.
 function history(uuid: string, days: number): UsageHistory {
-  if (uuid === U3) return { samples: [], resets: [], forecast: "Tahmin için yeterli veri yok" };
+  if (uuid === U3) return { samples: [], resets: [], forecast: L("Tahmin için yeterli veri yok", "Not enough data for a forecast") };
   const pro = uuid === U2;
   const reset = now - (pro ? 5.9 : 3.8) * 24 * H;
   const week = 7 * 24 * H;
@@ -180,7 +194,9 @@ function history(uuid: string, days: number): UsageHistory {
   return {
     samples: samples.filter((s) => s.t >= now - days * 24 * H),
     resets: [reset, reset - week].filter((r) => r > start && r >= now - days * 24 * H),
-    forecast: pro ? "Bu hızla cuma 14:00 civarı dolar" : "Bu hızla sıfırlanmadan önce dolmaz",
+    forecast: pro
+      ? L("Bu hızla cuma 14:00 civarı dolar", "At this pace it fills up around Friday 14:00")
+      : L("Bu hızla sıfırlanmadan önce dolmaz", "At this pace it won't fill up before the reset"),
   };
 }
 
@@ -214,7 +230,10 @@ export function installDevMock() {
           return location.search.includes("bos") ? { ...spending(args.days), totals: { tokens: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: 0 }, messages: 0, chats: 0 }, projects: [], chats: [], models: [] } : spending(args.days);
         case "refresh_all_usage":
           await sleep(700);
-          return { dashboard: snap(), notes: ["Örnek: 1 hesap için Claude Desktop kaydı kullanıldı."] };
+          return {
+            dashboard: snap(),
+            notes: [L("deneme.kisisel@example.com: anlık veri yok, Claude Desktop'un 2 saat önceki kaydı gösteriliyor", "deneme.kisisel@example.com: no live data, showing Claude Desktop's record from 2 hours ago")],
+          };
         case "plugin:app|version":
           return "1.0.0";
         case "get_switch_plan":
@@ -226,7 +245,10 @@ export function installDevMock() {
           return { available: true, version: "1.1.0", notes: "Örnek sürüm notu.", currentVersion: "1.0.0" };
         case "install_update":
           await sleep(1200);
-          throw "Önizlemede güncelleme kurulamaz.";
+          throw L("Güncelleme kurulamadı: önizlemede kurulamaz", "Couldn't install the update: not possible in the preview");
+        case "set_language":
+          state.automation.language = args.language;
+          return snap();
         case "set_auto_update":
           state.automation.autoUpdate = args.enabled;
           return snap();
@@ -237,7 +259,7 @@ export function installDevMock() {
           state.automation.notifyOnReset = args.enabled;
           return snap();
         case "set_switch_shortcut":
-          if (args.shortcut === "Ctrl+Shift+F12") throw "Bu kısayol başka bir uygulamada kullanılıyor"; // preview of the error toast
+          if (args.shortcut === "Ctrl+Shift+F12") throw L("Bu kısayol başka bir uygulamada kullanılıyor", "This shortcut is already used by another app"); // preview of the error toast
           state.automation.switchShortcut = args.shortcut;
           return snap();
         case "get_journal":
@@ -264,8 +286,8 @@ export function installDevMock() {
         }
         case "remove_account": {
           const a = state.accounts.find((x) => x.accountUuid === args.accountUuid);
-          if (!a) throw "Hesap bulunamadı.";
-          if (a.isActive) throw "Bu hesapla şu an Claude Desktop'ta giriş yapılmış; kaldırmak için önce başka bir hesaba geç.";
+          if (!a) throw L("Hesap bulunamadı.", "Account not found.");
+          if (a.isActive) throw L("Bu hesapla şu an Claude Desktop'ta giriş yapılmış; kaldırmak için önce başka bir hesaba geç.", "This account is signed in to Claude Desktop right now; switch to another account before removing it.");
           state.accounts = state.accounts.filter((x) => x !== a);
           state.automation.hiddenAccounts.push(a.accountUuid);
           await sleep(300);
@@ -290,7 +312,7 @@ export function installDevMock() {
           return { createdFiles: 2 };
         case "run_health_check":
           await sleep(900);
-          return health;
+          return health();
         case "search_chats": {
           await sleep(500);
           const q = String(args.query).toLowerCase();
@@ -308,7 +330,7 @@ export function installDevMock() {
         case "export_chat_markdown": {
           await sleep(300);
           const c = state.sessions.find((x) => x.cliSessionId === args.cliSessionId);
-          return `C:\\Users\\ornek\\Downloads\\Claude Sohbetleri\\${c?.title ?? "Sohbet"} (2025-01-15).md`;
+          return `C:\\Users\\ornek\\Downloads\\Claude Sohbetleri\\${c?.title ?? L("Sohbet", "Chat")} (2025-01-15).md`;
         }
         case "reveal_in_explorer":
           console.info("[devMock] reveal", args.path);
@@ -344,7 +366,7 @@ function spending(days: number): SpendingReport {
     { cliSessionId: "cli-mock-1", title: "Ödeme sayfası yeniden tasarım", cwd: projects[0].cwd, tokens: t(19_800_000), lastActivityAt: now - 2 * H },
     { cliSessionId: "cli-mock-2", title: "Sipariş API'si testleri", cwd: projects[1].cwd, tokens: t(12_100_000), lastActivityAt: now - 20 * H },
     { cliSessionId: "cli-mock-3", title: "Sepet hatası", cwd: projects[0].cwd, tokens: t(9_400_000), lastActivityAt: now - 7 * H },
-    { cliSessionId: "cli-unknown", title: "Adsız sohbet", cwd: projects[0].cwd, tokens: t(7_700_000), lastActivityAt: now - 30 * H },
+    { cliSessionId: "cli-unknown", title: L("Adsız sohbet", "Untitled chat"), cwd: projects[0].cwd, tokens: t(7_700_000), lastActivityAt: now - 30 * H },
     { cliSessionId: "cli-mock-4", title: "Toplantı notlarını düzenle", cwd: projects[2].cwd, tokens: t(4_300_000), lastActivityAt: now - 50 * H },
     { cliSessionId: "cli-mock-5", title: "CSV içe aktarma", cwd: projects[3].cwd, tokens: t(2_150_000), lastActivityAt: now - 90 * H },
   ];
