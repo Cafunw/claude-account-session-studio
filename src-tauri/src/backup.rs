@@ -36,7 +36,15 @@ pub struct BackupManifest {
     pub total_bytes: u64,
     pub all_verified: bool,
     pub files: Vec<BackupFileEntry>,
+    /// `None` = full snapshot; `Some(LIVE_REFRESH_BACKUP)` = only the pointers a refresh changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
+
+/// `BackupManifest::kind` of the small backups taken before refreshing pointers while Desktop runs.
+pub const LIVE_REFRESH_BACKUP: &str = "live-refresh";
+/// How many live-refresh backups pruning keeps (they come every 15 minutes all day).
+const KEEP_LIVE_REFRESH: usize = 20;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,19 +127,6 @@ pub fn create_verified_backup(
     reason: &str,
     mode: &str,
 ) -> Result<BackupManifest, String> {
-    fs::create_dir_all(backup_storage_dir)
-        .map_err(|e| format!("Failed to create backup storage root: {e}"))?;
-
-    let now = Utc::now();
-    let id = format!(
-        "backup-{}-{}",
-        now.format("%Y%m%d-%H%M%S"),
-        &uuid::Uuid::new_v4().simple().to_string()[..6]
-    );
-    let dest_root = backup_storage_dir.join(&id);
-    fs::create_dir_all(&dest_root)
-        .map_err(|e| format!("Failed to create backup folder {}: {e}", dest_root.display()))?;
-
     let targets = [
         "claude-code-sessions",
         "local-agent-mode-sessions",
@@ -151,11 +146,36 @@ pub fn create_verified_backup(
     }
 
     files_to_copy.sort();
+    create_verified_file_backup(source_data_root, backup_storage_dir, &files_to_copy, reason, mode, None)
+}
 
-    let mut manifest_entries = Vec::with_capacity(files_to_copy.len());
+/// SHA-256 verified backup of just `files` (all under `source_data_root`), laid out and listed
+/// like a full backup so restore, `list_backups`, pruning and the health check treat it the same.
+pub fn create_verified_file_backup(
+    source_data_root: &Path,
+    backup_storage_dir: &Path,
+    files: &[PathBuf],
+    reason: &str,
+    mode: &str,
+    kind: Option<&str>,
+) -> Result<BackupManifest, String> {
+    fs::create_dir_all(backup_storage_dir)
+        .map_err(|e| format!("Failed to create backup storage root: {e}"))?;
+
+    let now = Utc::now();
+    let id = format!(
+        "backup-{}-{}",
+        now.format("%Y%m%d-%H%M%S"),
+        &uuid::Uuid::new_v4().simple().to_string()[..6]
+    );
+    let dest_root = backup_storage_dir.join(&id);
+    fs::create_dir_all(&dest_root)
+        .map_err(|e| format!("Failed to create backup folder {}: {e}", dest_root.display()))?;
+
+    let mut manifest_entries = Vec::with_capacity(files.len());
     let mut total_bytes = 0u64;
 
-    for src_file in &files_to_copy {
+    for src_file in files {
         let rel_path = src_file
             .strip_prefix(source_data_root)
             .map_err(|e| format!("Strip prefix error: {e}"))?
@@ -213,6 +233,7 @@ pub fn create_verified_backup(
         total_bytes,
         all_verified: true,
         files: manifest_entries,
+        kind: kind.map(String::from),
     };
 
     let manifest_json = serde_json::to_vec_pretty(&manifest)
@@ -230,21 +251,24 @@ pub fn create_verified_backup(
         "ok",
     );
 
-    prune_old_backups(backup_storage_dir, &manifest.id);
+    prune_old_backups(backup_storage_dir, &manifest.id, kind == Some(LIVE_REFRESH_BACKUP));
 
     Ok(manifest)
 }
 
 /// Delete old automatic backups. Keeps: the last 7 days, the newest 10 automatic ones,
 /// `keep_id`, manual backups and anything that is not a `backup-*` dir with a parsable manifest.
+/// Live-refresh backups have their own rule: the newest 20 (counting `keep_id` when it is one,
+/// `keep_is_live`), whatever their age; they never take a slot of the newest 10.
 /// Never fails the caller; deletions are journaled.
-fn prune_old_backups(backup_storage_dir: &Path, keep_id: &str) {
+fn prune_old_backups(backup_storage_dir: &Path, keep_id: &str, keep_is_live: bool) {
     let Ok(entries) = fs::read_dir(backup_storage_dir) else {
         return;
     };
     let cutoff = Utc::now() - chrono::Duration::days(7);
     // (created_at, path, id) of automatic backups only
     let mut auto: Vec<(chrono::DateTime<chrono::FixedOffset>, PathBuf, String)> = Vec::new();
+    let mut live: Vec<(chrono::DateTime<chrono::FixedOffset>, PathBuf, String)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -262,15 +286,19 @@ fn prune_old_backups(backup_storage_dir: &Path, keep_id: &str) {
         }
         // unparsable date: keep, we cannot tell how old it is
         if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&m.created_at) {
-            auto.push((t, path, name));
+            if m.kind.as_deref() == Some(LIVE_REFRESH_BACKUP) {
+                live.push((t, path, name));
+            } else {
+                auto.push((t, path, name));
+            }
         }
     }
+    live.sort_by(|a, b| b.0.cmp(&a.0));
+    let live_old = live.into_iter().skip(KEEP_LIVE_REFRESH - usize::from(keep_is_live));
     auto.sort_by(|a, b| b.0.cmp(&a.0));
-    // the new backup is itself one of the newest 10, so it takes a slot: keep 9 others
-    for (t, path, name) in auto.into_iter().skip(9) {
-        if t.with_timezone(&Utc) >= cutoff {
-            continue;
-        }
+    // a new full backup is itself one of the newest 10, so it takes a slot: keep 9 others
+    let auto_old = auto.into_iter().skip(if keep_is_live { 10 } else { 9 }).filter(|(t, _, _)| t.with_timezone(&Utc) < cutoff);
+    for (_, path, name) in live_old.chain(auto_old) {
         match fs::remove_dir_all(&path) {
             Ok(()) => append_journal(backup_storage_dir, "prune", "auto", &format!("Deleted old backup {name}"), "ok"),
             Err(e) => append_journal(backup_storage_dir, "prune", "auto", &format!("Failed to delete {name}: {e}"), "error"),
@@ -335,6 +363,7 @@ pub fn list_backups(backup_storage_dir: &Path) -> Vec<BackupManifest> {
                             total_bytes,
                             all_verified: true,
                             files,
+                            kind: None,
                         });
                     }
                 }
@@ -453,13 +482,18 @@ pub fn execute_restore(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn fake(dir: &Path, id: &str, days_ago: i64, reason: &str) {
+        fake_kind(dir, id, chrono::Duration::days(days_ago), reason, None);
+    }
+
+    fn fake_kind(dir: &Path, id: &str, age: chrono::Duration, reason: &str, kind: Option<&str>) {
         let d = dir.join(id);
         fs::create_dir_all(&d).unwrap();
         let m = BackupManifest {
             id: id.into(),
-            created_at: (Utc::now() - chrono::Duration::days(days_ago)).to_rfc3339(),
+            created_at: (Utc::now() - age).to_rfc3339(),
             reason: reason.into(),
             source_root: String::new(),
             backup_dir: d.to_string_lossy().into_owned(),
@@ -467,6 +501,7 @@ mod tests {
             total_bytes: 0,
             all_verified: true,
             files: vec![],
+            kind: kind.map(String::from),
         };
         fs::write(d.join("backup-manifest.json"), serde_json::to_vec(&m).unwrap()).unwrap();
     }
@@ -487,7 +522,7 @@ mod tests {
         fs::create_dir_all(p.join("backup-nomanifest")).unwrap();
         fs::create_dir_all(p.join("other")).unwrap();
 
-        prune_old_backups(p, "backup-new");
+        prune_old_backups(p, "backup-new", false);
 
         let mut left: Vec<String> = fs::read_dir(p)
             .unwrap()
@@ -502,6 +537,33 @@ mod tests {
                 .map(String::from),
         );
         want.sort();
+        assert_eq!(left, want);
+    }
+
+    #[test]
+    fn prune_keeps_newest_20_live_refresh_backups_apart_from_full_ones() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        // 25 live-refresh backups, 15 minutes apart, all within today: only the newest 20 survive.
+        for i in 0..25 {
+            fake_kind(p, &format!("backup-live{i:02}"), chrono::Duration::minutes(15 * i), "x", Some(LIVE_REFRESH_BACKUP));
+        }
+        // 12 old full backups: the live ones take none of the newest-10 slots, so 10 survive.
+        for i in 0..12 {
+            fake(p, &format!("backup-full{i:02}"), 30 + i, "Hesap değişimi");
+        }
+        prune_old_backups(p, "backup-live00", true);
+        let left: HashSet<String> = fs::read_dir(p).unwrap().flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let mut want: HashSet<String> = (0..20).map(|i| format!("backup-live{i:02}")).collect();
+        want.extend((0..10).map(|i| format!("backup-full{i:02}")));
+        assert_eq!(left, want);
+
+        // A new full backup: the 20 live ones stay, the full ones keep 9 besides it.
+        fake(p, "backup-fullnew", 0, "Hesap değişimi");
+        prune_old_backups(p, "backup-fullnew", false);
+        let left: HashSet<String> = fs::read_dir(p).unwrap().flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        want.remove("backup-full09");
+        want.insert("backup-fullnew".into());
         assert_eq!(left, want);
     }
 }

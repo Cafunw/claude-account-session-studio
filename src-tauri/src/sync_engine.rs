@@ -15,13 +15,15 @@
 //!    directory and writes files atomically with SHA-256 verification and journal logging.
 
 use crate::accounts::{AccountProfile, AutomationSettings};
-use crate::backup::{append_journal, create_verified_backup};
+use crate::backup::{append_journal, create_verified_backup, create_verified_file_backup, LIVE_REFRESH_BACKUP};
 use crate::dpapi::{atomic_write_verified, is_file_locked, sha256_bytes};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1061,8 +1063,8 @@ fn refreshed_bytes(item: &SyncActionItem, target_raw: &str, source: &Value) -> O
 /// Execute the non-destructive session synchronization across accounts.
 /// - Creates a SHA-256 verified backup in `backup_storage_dir` BEFORE any write.
 /// - Never deletes or moves a session file; an existing one is only touched by
-///   `metadata-refresh` (date/turns/title) or `continue-refresh` (plus transcript ids), and only
-///   while Claude Desktop is not running.
+///   `metadata-refresh` (date/turns/title) or `continue-refresh` (plus transcript ids). While
+///   Claude Desktop runs, only outside the signed-in account and at most every 15 minutes.
 /// - Strips `bridgeSessionIds` (`[]`) so OAuth/bridge tokens never cross accounts.
 /// - Checks for file locks and aborts cleanly if any unexpected error occurs.
 pub fn execute_sync(
@@ -1075,20 +1077,53 @@ pub fn execute_sync(
     take_backup: bool,
     selection: Option<&SyncSelection>,
 ) -> Result<SyncExecutionResult, String> {
-    // A running Desktop rewrites the signed-in account's pointers, and every refresh forces a full
-    // backup while the active chat keeps the others stale; refresh once Desktop is closed instead.
-    let allow_metadata_refresh = !crate::paths::is_claude_desktop_running(Some(data_root));
-    execute_sync_inner(
-        data_root,
-        projects_dir,
-        backup_storage_dir,
-        accounts,
-        sync_sidebar_groups,
-        mode,
-        take_backup,
-        allow_metadata_refresh,
-        selection,
-    )
+    let run = |desktop| {
+        execute_sync_inner(data_root, projects_dir, backup_storage_dir, accounts, sync_sidebar_groups, mode, take_backup, desktop, selection)
+    };
+    if !crate::paths::is_claude_desktop_running(Some(data_root)) {
+        return run(Desktop::Closed);
+    }
+    // Held for the whole run, so two live syncs never both pass the rate limit.
+    let mut last = LAST_LIVE_REFRESH.lock().unwrap_or_else(|e| e.into_inner());
+    with_live_limit(&mut last, Instant::now(), |refresh_due| run(Desktop::Running { refresh_due }))
+}
+
+/// Desktop replaces `local_X.json` by writing `local_X.json.tmp`, deleting the old file and renaming;
+/// while the `.tmp` exists the pointer is mid-rewrite and must not be created by sync.
+fn desktop_rewriting(path: &Path) -> bool {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    Path::new(&tmp).exists()
+}
+
+/// Claude Desktop's state for one sync run.
+#[derive(Clone, Copy)]
+enum Desktop {
+    Closed,
+    /// `refresh_due`: the live-refresh rate limit allows refreshing pointers this round.
+    Running { refresh_due: bool },
+}
+
+/// While Desktop runs, existing pointers are refreshed at most this often: the chat being typed in
+/// changes every minute, and its copy in the other account need not follow every turn.
+const LIVE_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// When the last refresh was written while Desktop was running (process-wide).
+static LAST_LIVE_REFRESH: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Runs `sync(refresh_due)` under the live-refresh rate limit; `last` moves to `now` only when a
+/// refresh was really written, so a round with nothing to refresh does not delay the next one.
+fn with_live_limit(
+    last: &mut Option<Instant>,
+    now: Instant,
+    sync: impl FnOnce(bool) -> Result<SyncExecutionResult, String>,
+) -> Result<SyncExecutionResult, String> {
+    let due = last.map_or(true, |t| now.saturating_duration_since(t) >= LIVE_REFRESH_INTERVAL);
+    let res = sync(due)?;
+    if res.refreshed_metadata + res.continued_pointers > 0 {
+        *last = Some(now);
+    }
+    Ok(res)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1100,7 +1135,7 @@ fn execute_sync_inner(
     sync_sidebar_groups: bool,
     mode: &str,
     take_backup: bool,
-    allow_metadata_refresh: bool,
+    desktop: Desktop,
     selection: Option<&SyncSelection>,
 ) -> Result<SyncExecutionResult, String> {
     if let Some(detail) = crate::format_guard::check(data_root) {
@@ -1113,6 +1148,15 @@ fn execute_sync_inner(
         return Err(msg);
     }
     let preview = preview_sync(data_root, projects_dir, accounts, mode, selection);
+    // A running Desktop rewrites only the signed-in account's pointers: refresh the others (rate
+    // limited), and that one only once Desktop is closed. Unknown signed-in account: none.
+    let signed_in = crate::paths::read_last_known_account(&data_root.join("config.json"));
+    let may_refresh = |target: &str| match desktop {
+        Desktop::Closed => true,
+        Desktop::Running { refresh_due } => {
+            refresh_due && signed_in.as_deref().is_some_and(|s| !s.eq_ignore_ascii_case(target))
+        }
+    };
 
     // 1. Pre-flight check: verify no target path already exists or is locked
     let mut staged_writes: Vec<(PathBuf, Vec<u8>, String)> = Vec::new();
@@ -1125,7 +1169,7 @@ fn execute_sync_inner(
 
     for item in &preview.actions {
         if item.action == "metadata-refresh" || item.action == "continue-refresh" {
-            if !allow_metadata_refresh {
+            if !may_refresh(&item.target_account_uuid) {
                 continue;
             }
             let target_path = Path::new(&item.target_file_path);
@@ -1152,7 +1196,7 @@ fn execute_sync_inner(
         let target_path = PathBuf::from(&item.target_file_path);
 
         // Double-check that target file does NOT exist so we NEVER overwrite
-        if target_path.exists() {
+        if target_path.exists() || desktop_rewriting(&target_path) {
             if is_file_locked(&target_path) {
                 return Err(format!(
                     "Sync aborted: Target file {} is locked by another process.",
@@ -1175,28 +1219,18 @@ fn execute_sync_inner(
             })
         };
 
-        let Some(src_rec) = src_record else {
-            return Err(format!(
-                "Sync aborted: Could not locate source session record for {}",
-                item.session_id
-            ));
+        // Desktop replaces a pointer via `.tmp` + delete + rename: a source that is missing or
+        // unreadable right now is skipped this round, never a failed sync.
+        let Some(raw_source) = src_record.and_then(|s| fs::read_to_string(&s.file_path).ok()) else {
+            continue;
         };
-
-        let raw_source = fs::read_to_string(&src_rec.file_path).map_err(|e| {
-            format!(
-                "Sync aborted: Failed reading source session {}: {e}",
-                src_rec.file_path
-            )
-        })?;
-
-        let prepared_bytes = if item.action == "conflict-companion" {
-            prepare_cross_account_session_json(
-                &raw_source,
-                Some(&item.session_id),
-                Some(&item.title),
-            )?
+        let prepared = if item.action == "conflict-companion" {
+            prepare_cross_account_session_json(&raw_source, Some(&item.session_id), Some(&item.title))
         } else {
-            prepare_cross_account_session_json(&raw_source, None, None)?
+            prepare_cross_account_session_json(&raw_source, None, None)
+        };
+        let Ok(prepared_bytes) = prepared else {
+            continue;
         };
 
         staged_writes.push((target_path, prepared_bytes, item.action.clone()));
@@ -1219,7 +1253,15 @@ fn execute_sync_inner(
     // 2. SHA-256 verified backup before writing. Callers may skip it only for pure additions
     //    (no sidebar merge, no metadata refresh), where no existing file is touched; the
     //    background loop throttles it.
-    let backup_id = if take_backup || sync_sidebar_groups || !staged_refreshes.is_empty() {
+    //    While Desktop runs, a refresh never forces a full backup: new copies follow `take_backup`,
+    //    and staged refreshes get a backup of just the pointers they change.
+    let running = matches!(desktop, Desktop::Running { .. });
+    let full_backup = take_backup || sync_sidebar_groups || (!running && !staged_refreshes.is_empty());
+    let backup_id = if !full_backup && !staged_refreshes.is_empty() {
+        let files: Vec<PathBuf> = staged_refreshes.iter().map(|(i, _)| PathBuf::from(&i.target_file_path)).collect();
+        let reason = crate::i18n::t("Eşitleme öncesi (yalnızca değişen kayıtlar)", "Before sync (changed chats only)");
+        create_verified_file_backup(data_root, backup_storage_dir, &files, reason, mode, Some(LIVE_REFRESH_BACKUP))?.id
+    } else if full_backup {
         create_verified_backup(
             data_root,
             backup_storage_dir,
@@ -1242,7 +1284,7 @@ fn execute_sync_inner(
     let mut created_conflict_companions = 0usize;
 
     for (target_path, bytes, action_kind) in staged_writes {
-        if target_path.exists() {
+        if target_path.exists() || desktop_rewriting(&target_path) {
             // Strict safety guard: never overwrite an existing file
             continue;
         }
@@ -1501,7 +1543,7 @@ mod tests {
         let preview_ab = preview_sync(&data_root, &projects_dir, &accounts, "sandbox", None);
         assert_eq!(preview_ab.copy_new_count, 1);
 
-        let res_ab = execute_sync_inner(&data_root, &projects_dir, &backups_dir, &accounts, true, "sandbox", true, true, None).unwrap();
+        let res_ab = execute_sync_inner(&data_root, &projects_dir, &backups_dir, &accounts, true, "sandbox", true, Desktop::Closed, None).unwrap();
         assert_eq!(res_ab.copied_new_files, 1);
         set_active_account(&data_root, &acc_b);
 
@@ -1568,7 +1610,7 @@ mod tests {
         );
         assert_eq!(preview_ba.metadata_refresh_count, 1, "A's local_s1 is older than B's");
 
-        let res_ba = execute_sync_inner(&data_root, &projects_dir, &backups_dir, &accounts, true, "sandbox", true, true, None).unwrap();
+        let res_ba = execute_sync_inner(&data_root, &projects_dir, &backups_dir, &accounts, true, "sandbox", true, Desktop::Closed, None).unwrap();
         assert_eq!(res_ba.copied_new_files, 1);
         assert_eq!(res_ba.created_conflict_companions, 0);
         assert_eq!(res_ba.refreshed_metadata, 1);
@@ -1598,7 +1640,7 @@ mod tests {
 
         // 7. A background sync with nothing to do must not create another (large) backup.
         let backups_before = fs::read_dir(&backups_dir).unwrap().count();
-        let idle = execute_sync_inner(&data_root, &projects_dir, &backups_dir, &accounts, false, "sandbox", true, true, None).unwrap();
+        let idle = execute_sync_inner(&data_root, &projects_dir, &backups_dir, &accounts, false, "sandbox", true, Desktop::Closed, None).unwrap();
         assert!(idle.pre_sync_backup_id.is_empty());
         assert_eq!(idle.refreshed_metadata, 0);
         assert_eq!(fs::read_dir(&backups_dir).unwrap().count(), backups_before);
@@ -1629,16 +1671,18 @@ mod tests {
         pointer(&data_root.join("claude-code-sessions").join(&acc_b.account_uuid).join("org-bbbb"), 5, 200, "new");
         let hash_a = sha256_file(&path_a).unwrap();
 
-        // Desktop running: preview still reports the refresh, but nothing is written and no backup is forced.
+        // Desktop running with A signed in: preview still reports the refresh, but nothing is written
+        // and no backup is forced.
+        set_active_account(&data_root, &acc_a);
         assert_eq!(preview_sync(&data_root, &projects_dir, &accounts, "sandbox", None).metadata_refresh_count, 1);
-        let res = execute_sync_inner(&data_root, &projects_dir, &backups_dir, &accounts, false, "sandbox", false, false, None).unwrap();
+        let res = execute_sync_inner(&data_root, &projects_dir, &backups_dir, &accounts, false, "sandbox", false, Desktop::Running { refresh_due: true }, None).unwrap();
         assert_eq!(res.refreshed_metadata, 0);
         assert!(res.pre_sync_backup_id.is_empty());
         assert_eq!(sha256_file(&path_a).unwrap(), hash_a);
         assert!(!backups_dir.exists() || fs::read_dir(&backups_dir).unwrap().count() == 0);
 
         // Desktop closed: A is refreshed, with a backup even though take_backup=false.
-        let res = execute_sync_inner(&data_root, &projects_dir, &backups_dir, &accounts, false, "sandbox", false, true, None).unwrap();
+        let res = execute_sync_inner(&data_root, &projects_dir, &backups_dir, &accounts, false, "sandbox", false, Desktop::Closed, None).unwrap();
         assert_eq!(res.refreshed_metadata, 1);
         assert!(!res.pre_sync_backup_id.starts_with("none"));
         let a: Value = serde_json::from_str(&fs::read_to_string(&path_a).unwrap()).unwrap();
@@ -1676,7 +1720,7 @@ mod tests {
         assert_eq!(preview_sync(&data_root, &projects_dir, &accounts, "sandbox", None).copy_new_count, 3);
 
         for _ in 0..2 {
-            let err = execute_sync_inner(&data_root, &projects_dir, &backups_dir, &accounts, true, "sandbox", true, true, None).unwrap_err();
+            let err = execute_sync_inner(&data_root, &projects_dir, &backups_dir, &accounts, true, "sandbox", true, Desktop::Closed, None).unwrap_err();
             assert!(crate::format_guard::is_guard_error(&err), "{err}");
         }
         assert_eq!(fs::read_dir(&dir_b).unwrap().count(), 0, "nothing may be written");
@@ -1798,7 +1842,14 @@ mod tests {
             preview_sync(&self.data_root, &self.projects_dir, &self.accounts, "sandbox", None)
         }
         fn run(&self, desktop_closed: bool) -> SyncExecutionResult {
-            execute_sync_inner(&self.data_root, &self.projects_dir, &self.backups_dir, &self.accounts, false, "sandbox", false, desktop_closed, None).unwrap()
+            execute_sync_inner(&self.data_root, &self.projects_dir, &self.backups_dir, &self.accounts, false, "sandbox", false, if desktop_closed { Desktop::Closed } else { Desktop::Running { refresh_due: true } }, None).unwrap()
+        }
+        /// A sync while Desktop runs, under the rate limit with `last` / `now` injected.
+        fn run_live(&self, last: &mut Option<Instant>, now: Instant) -> SyncExecutionResult {
+            with_live_limit(last, now, |refresh_due| {
+                execute_sync_inner(&self.data_root, &self.projects_dir, &self.backups_dir, &self.accounts, false, "live", false, Desktop::Running { refresh_due }, None)
+            })
+            .unwrap()
         }
         fn backups(&self) -> usize {
             fs::read_dir(&self.backups_dir).map(|d| d.flatten().filter(|e| e.path().is_dir()).count()).unwrap_or(0)
@@ -1828,7 +1879,8 @@ mod tests {
         assert_eq!(ask.continue_refresh_count, 1);
         assert!(pending_for_target(&e.data_root, &e.projects_dir, &e.accounts, Some(&empty_selection()), &e.accounts[1].account_uuid).is_empty());
 
-        // Desktop running: nothing written, no backup.
+        // Desktop running with B (the target) signed in: nothing written, no backup.
+        set_active_account(&e.data_root, &e.accounts[1]);
         let res = e.run(false);
         assert_eq!(res.continued_pointers, 0);
         assert!(res.pre_sync_backup_id.is_empty());
@@ -1887,7 +1939,7 @@ mod tests {
         changed["lastActivityAt"] = json!(150);
         fs::write(&path_b, serde_json::to_vec_pretty(&changed).unwrap()).unwrap();
         let hash_b = sha256_file(&path_b).unwrap();
-        let res = execute_sync_inner(&e.data_root, &e.projects_dir, &e.backups_dir, &e.accounts, false, "sandbox", false, true, None).unwrap();
+        let res = execute_sync_inner(&e.data_root, &e.projects_dir, &e.backups_dir, &e.accounts, false, "sandbox", false, Desktop::Closed, None).unwrap();
         assert_eq!(res.created_conflict_companions, 0);
         // The fresh preview inside execute sees 150 and updates it; that is the newest state, not a stale write.
         assert_eq!(res.continued_pointers, 1);
@@ -1967,5 +2019,105 @@ mod tests {
         assert!(prior_cli_ids(&json!({})).is_empty());
         assert!(prior_cli_ids(&json!({"priorCliSessionIds": "x"})).is_empty());
         assert_eq!(prior_cli_ids(&json!({"priorCliSessionIds": ["a", 1, null, "", "b"]})), ["a", "b"]);
+    }
+
+    #[test]
+    fn live_refresh_skips_signed_in_account_backs_up_only_changed_files_and_is_rate_limited() {
+        let e = env();
+        set_active_account(&e.data_root, &e.accounts[0]); // A is signed in to the running Desktop
+        // s1: A's copy is stale (must wait); s2: B's copy is stale; s3: B's copy waits for a continue-refresh.
+        let (a_s1, _) = e.pointer(0, "local_s1", "cli-1", &[], 100, 1, "s1 old");
+        e.pointer(1, "local_s1", "cli-1", &[], 200, 2, "s1 new");
+        e.pointer(0, "local_s2", "cli-2", &[], 200, 2, "s2 new");
+        let (b_s2, _) = e.pointer(1, "local_s2", "cli-2", &[], 100, 1, "s2 old");
+        e.pointer(0, "local_s3", "cli-3b", &["cli-3a"], 200, 2, "s3 new");
+        let (b_s3, _) = e.pointer(1, "local_s3", "cli-3a", &[], 100, 1, "s3 old");
+        let a_s1_hash = sha256_file(&a_s1).unwrap();
+        let pre: Vec<String> = [&b_s2, &b_s3].iter().map(|p| sha256_file(p).unwrap()).collect();
+
+        let t0 = Instant::now();
+        let mut last = None;
+        let res = e.run_live(&mut last, t0);
+        assert_eq!((res.refreshed_metadata, res.continued_pointers), (1, 1));
+        assert_eq!(last, Some(t0));
+        assert_eq!(sha256_file(&a_s1).unwrap(), a_s1_hash, "signed-in account untouched");
+        assert_eq!(read_json(&b_s2)["title"], "s2 new");
+        assert_eq!(read_json(&b_s3)["cliSessionId"], "cli-3b");
+
+        // The backup holds exactly the two pre-images and verifies.
+        let backups = crate::backup::list_backups(&e.backups_dir);
+        assert_eq!(backups.len(), 1);
+        let b = &backups[0];
+        assert_eq!(res.pre_sync_backup_id, b.id);
+        let rel = |p: &Path| p.strip_prefix(&e.data_root).unwrap().to_string_lossy().replace('\\', "/");
+        let mut files: Vec<String> = b.files.iter().map(|f| f.relative_path.clone()).collect();
+        files.sort();
+        assert_eq!(files, [rel(&b_s2), rel(&b_s3)]);
+        assert_eq!(b.files.iter().map(|f| f.sha256.clone()).collect::<HashSet<_>>(), pre.into_iter().collect());
+        assert!(crate::backup::verify_backup_integrity(&e.backups_dir, &b.id).unwrap());
+        let journal = crate::backup::read_journal(&e.backups_dir, 2);
+        assert_eq!((journal[0].operation.as_str(), journal[1].operation.as_str()), ("session-sync", "backup"));
+
+        // B's s2 falls behind again: blocked inside the 15-minute window, refreshed after it.
+        e.pointer(0, "local_s2", "cli-2", &[], 300, 3, "s2 newer");
+        let blocked = e.run_live(&mut last, t0 + Duration::from_secs(5 * 60));
+        assert_eq!(blocked.refreshed_metadata, 0);
+        assert!(blocked.pre_sync_backup_id.is_empty(), "no write, no backup");
+        assert_eq!(read_json(&b_s2)["title"], "s2 new");
+        assert_eq!(last, Some(t0));
+        let later = t0 + Duration::from_secs(16 * 60);
+        assert_eq!(e.run_live(&mut last, later).refreshed_metadata, 1);
+        assert_eq!(read_json(&b_s2)["title"], "s2 newer");
+        assert_eq!(last, Some(later));
+        assert_eq!(sha256_file(&a_s1).unwrap(), a_s1_hash);
+
+        // Unknown signed-in account: nothing is refreshed while Desktop runs.
+        fs::remove_file(e.data_root.join("config.json")).unwrap();
+        e.pointer(0, "local_s2", "cli-2", &[], 400, 4, "s2 newest");
+        assert_eq!(e.run_live(&mut None, later).refreshed_metadata, 0);
+    }
+
+    #[test]
+    fn source_mid_rewrite_is_skipped_without_error() {
+        let e = env();
+        set_active_account(&e.data_root, &e.accounts[0]);
+        // Desktop is replacing A's pointer: only `local_s1.json.tmp` exists right now.
+        let (a_s1, a_json) = e.pointer(0, "local_s1", "cli-1", &[], 300, 3, "new");
+        fs::rename(&a_s1, e.dir(0).join("local_s1.json.tmp")).unwrap();
+        e.pointer(1, "local_s1", "cli-1", &[], 100, 1, "old");
+        for desktop in [Desktop::Closed, Desktop::Running { refresh_due: true }] {
+            let res = execute_sync_inner(&e.data_root, &e.projects_dir, &e.backups_dir, &e.accounts, false, "live", false, desktop, None).unwrap();
+            assert_eq!((res.copied_new_files, res.created_conflict_companions, res.refreshed_metadata), (0, 0, 0));
+        }
+        assert!(!a_s1.exists(), "B's older copy must not land in A while Desktop renames");
+        // Desktop finishes the rename: B is refreshed from it as usual.
+        fs::rename(e.dir(0).join("local_s1.json.tmp"), &a_s1).unwrap();
+        assert_eq!(e.run_live(&mut None, Instant::now()).refreshed_metadata, 1);
+        assert_eq!(read_json(&e.dir(1).join("local_s1.json"))["title"], a_json["title"]);
+    }
+
+    #[test]
+    fn live_round_with_a_new_copy_takes_no_full_backup() {
+        let e = env();
+        set_active_account(&e.data_root, &e.accounts[0]);
+        e.pointer(0, "local_new", "cli-new", &[], 50, 1, "new chat"); // B lacks it: a new copy
+        e.pointer(0, "local_s2", "cli-2", &[], 200, 2, "s2 new");
+        let (b_s2, _) = e.pointer(1, "local_s2", "cli-2", &[], 100, 1, "s2 old");
+        let res = e.run_live(&mut None, Instant::now());
+        assert_eq!((res.copied_new_files, res.refreshed_metadata), (1, 1));
+        let backups = crate::backup::list_backups(&e.backups_dir);
+        assert_eq!(backups.len(), 1, "no full backup next to the small one");
+        let b = &backups[0];
+        assert_eq!((b.id.as_str(), b.kind.as_deref()), (res.pre_sync_backup_id.as_str(), Some(LIVE_REFRESH_BACKUP)));
+        let rel = b_s2.strip_prefix(&e.data_root).unwrap().to_string_lossy().replace('\\', "/");
+        assert_eq!(b.files.iter().map(|f| f.relative_path.as_str()).collect::<Vec<_>>(), [rel.as_str()]);
+        assert!(e.dir(1).join("local_new.json").is_file());
+
+        // Desktop closed: a refresh still forces the full backup, as before.
+        e.pointer(0, "local_s2", "cli-2", &[], 300, 3, "s2 newer");
+        let res = e.run(true);
+        assert_eq!(res.refreshed_metadata, 1);
+        let full = crate::backup::list_backups(&e.backups_dir).into_iter().find(|b| b.id == res.pre_sync_backup_id).unwrap();
+        assert!(full.kind.is_none() && full.total_files > 1);
     }
 }

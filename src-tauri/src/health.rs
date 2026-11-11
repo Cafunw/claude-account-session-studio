@@ -166,6 +166,7 @@ mod tests {
                 size_bytes: content.len() as u64,
                 verified: true,
             }],
+            kind: None,
         };
         fs::write(bdir.join("backup-manifest.json"), serde_json::to_string(&manifest).unwrap()).unwrap();
 
