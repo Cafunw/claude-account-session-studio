@@ -292,6 +292,76 @@ pub fn export_chat_markdown(cli_session_id: String, state: State<'_, AppState>) 
     Ok(export_markdown(&transcript, session, &export_dir())?.to_string_lossy().into_owned())
 }
 
+const MAX_BULK_CHATS: usize = 500;
+
+#[derive(Debug, Serialize)]
+pub struct SkippedChat {
+    pub title: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkExport {
+    pub folder: String,
+    pub exported: usize,
+    pub skipped: Vec<SkippedChat>,
+}
+
+/// Exports every listed chat in `ids` into ONE new sub-folder of `root` (never an existing one).
+/// Unknown / transcript-less / oversized chats are skipped with a reason; if nothing is written the
+/// folder this call created is removed again (`remove_dir` refuses a non-empty folder).
+fn export_many(projects: &Path, sessions: &[SessionRecord], ids: &[String], root: &Path, stamp: &str) -> Result<BulkExport, String> {
+    let mut seen = HashSet::new();
+    let ids: Vec<&String> = ids.iter().filter(|id| seen.insert(id.as_str())).collect();
+    if ids.is_empty() {
+        return Err(i18n::t("Kaydedilecek sohbet yok.", "There are no chats to save.").into());
+    }
+    if ids.len() > MAX_BULK_CHATS {
+        return Err(i18n::t(
+            format!("Tek seferde en fazla {MAX_BULK_CHATS} sohbet kaydedilebilir; seçimi daralt."),
+            format!("At most {MAX_BULK_CHATS} chats can be saved at once; narrow the selection."),
+        ));
+    }
+    let io_err = |e: std::io::Error| i18n::t(format!("Klasör oluşturulamadı: {e}"), format!("Couldn't create the folder: {e}"));
+    fs::create_dir_all(root).map_err(io_err)?;
+    let mut folder = root.join(stamp);
+    for n in 2u32.. {
+        match fs::create_dir(&folder) {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => folder = root.join(format!("{stamp} ({n})")),
+            Err(e) => return Err(io_err(e)),
+        }
+    }
+    let transcripts = index_transcripts(projects);
+    let (mut exported, mut skipped) = (0, Vec::new());
+    for id in ids {
+        let session = sessions.iter().find(|s| s.cli_session_id.as_deref() == Some(id.as_str()));
+        let title = session.map(|s| s.title.clone()).unwrap_or_else(|| id.clone());
+        let result = match (session, transcripts.get(id.as_str())) {
+            (None, _) => Err(i18n::t("Sohbet bulunamadı.", "Chat not found.").to_string()),
+            (_, None) => Err(i18n::t("Bu sohbetin içeriği diskte yok.", "This chat's content is not on disk.").to_string()),
+            (Some(s), Some(t)) => export_markdown(t, s, &folder),
+        };
+        match result {
+            Ok(_) => exported += 1,
+            Err(reason) => skipped.push(SkippedChat { title, reason }),
+        }
+    }
+    if exported == 0 {
+        let _ = fs::remove_dir(&folder);
+        let first = skipped.first().map(|s| s.reason.as_str()).unwrap_or_default();
+        return Err(i18n::t(format!("Hiçbir sohbet kaydedilemedi: {first}"), format!("No chat could be saved: {first}")));
+    }
+    Ok(BulkExport { folder: folder.to_string_lossy().into_owned(), exported, skipped })
+}
+
+#[tauri::command(async)]
+pub fn export_chats_markdown(cli_session_ids: Vec<String>, state: State<'_, AppState>) -> Result<BulkExport, String> {
+    let (projects, sessions) = listed_chats(&state);
+    let stamp = format!("toplu-{}", chrono::Local::now().format("%Y-%m-%d-%H%M"));
+    export_many(&projects, &sessions, &cli_session_ids, &export_dir(), &stamp)
+}
+
 #[tauri::command(async)]
 pub fn reveal_in_explorer(path: String) -> Result<(), String> {
     let canon = reveal_target(Path::new(&path), &export_dir(), &downloads_dir())?;
@@ -452,6 +522,91 @@ mod tests {
         let en = fs::read_to_string(export_markdown(&t, &s, &out).unwrap()).unwrap();
         assert!(en.contains("**Folder:** C:\\work\\demo") && en.contains("**Date:** 20"));
         assert!(en.contains("**You:**\n\nsoru?") && en.contains("**Claude:**\n\ncevap") && en.contains("_Tool: Bash_"));
+    }
+
+    fn bulk_setup(tmp: &Path, ids: &[&str]) -> (PathBuf, Vec<SessionRecord>) {
+        let projects = tmp.join("projects");
+        for id in ids {
+            write_transcript(&projects, id, &[user("soru"), assistant(json!([{"type": "text", "text": "cevap"}]))]);
+        }
+        (projects, ids.iter().map(|id| session(id, &format!("Sohbet {id}"))).collect())
+    }
+
+    fn md_count(dir: &str) -> usize {
+        fs::read_dir(dir).unwrap().flatten().filter(|f| f.path().extension().is_some_and(|e| e == "md")).count()
+    }
+
+    #[test]
+    fn bulk_export_puts_chats_in_one_new_folder_and_a_second_run_makes_another() {
+        i18n::set_test_lang(i18n::Lang::Tr);
+        let tmp = tempfile::tempdir().unwrap();
+        let (projects, sessions) = bulk_setup(tmp.path(), &["a", "b", "c"]);
+        let root = tmp.path().join("exports");
+        let ids: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        let r1 = export_many(&projects, &sessions, &ids, &root, "toplu-x").unwrap();
+        assert_eq!((r1.exported, r1.skipped.len()), (3, 0));
+        assert_eq!(PathBuf::from(&r1.folder), root.join("toplu-x"));
+        assert_eq!(md_count(&r1.folder), 3);
+        let r2 = export_many(&projects, &sessions, &ids, &root, "toplu-x").unwrap();
+        assert_eq!(PathBuf::from(&r2.folder), root.join("toplu-x (2)"));
+        assert_eq!((md_count(&r1.folder), md_count(&r2.folder)), (3, 3));
+    }
+
+    #[test]
+    fn bulk_export_skips_missing_transcripts_and_unknown_ids_and_dedupes() {
+        i18n::set_test_lang(i18n::Lang::Tr);
+        let tmp = tempfile::tempdir().unwrap();
+        let (projects, mut sessions) = bulk_setup(tmp.path(), &["a"]);
+        sessions.push(session("gone", "Kayıp sohbet"));
+        let root = tmp.path().join("exports");
+        let ids: Vec<String> = ["a", "a", "gone", "nope", "a"].map(String::from).to_vec();
+        let r = export_many(&projects, &sessions, &ids, &root, "t").unwrap();
+        assert_eq!(r.exported, 1);
+        assert_eq!(md_count(&r.folder), 1);
+        assert_eq!(r.skipped.len(), 2);
+        assert_eq!(r.skipped[0].title, "Kayıp sohbet");
+        assert!(r.skipped[0].reason.contains("diskte yok"));
+        assert_eq!((r.skipped[1].title.as_str(), r.skipped[1].reason.as_str()), ("nope", "Sohbet bulunamadı."));
+    }
+
+    #[test]
+    fn bulk_export_rejects_over_the_cap_before_writing_and_cleans_up_when_nothing_is_saved() {
+        i18n::set_test_lang(i18n::Lang::Tr);
+        let tmp = tempfile::tempdir().unwrap();
+        let (projects, sessions) = bulk_setup(tmp.path(), &["a"]);
+        let root = tmp.path().join("exports");
+        let many: Vec<String> = (0..=MAX_BULK_CHATS).map(|i| format!("c{i}")).collect();
+        assert!(export_many(&projects, &sessions, &many, &root, "t").is_err());
+        assert!(!root.exists(), "nothing is created when the cap is exceeded");
+        assert!(export_many(&projects, &sessions, &[], &root, "t").is_err());
+        // Exactly at the cap is accepted as a request (all unknown here, so it errors for that reason instead).
+        let at_cap: Vec<String> = (0..MAX_BULK_CHATS).map(|i| format!("c{i}")).collect();
+        let err = export_many(&projects, &sessions, &at_cap, &root, "t").unwrap_err();
+        assert!(err.starts_with("Hiçbir sohbet kaydedilemedi"), "{err}");
+
+        // An older folder with the same name survives; only the folder made by this call is removed.
+        fs::create_dir_all(root.join("t")).unwrap();
+        fs::write(root.join("t").join("eski.md"), "x").unwrap();
+        assert!(export_many(&projects, &sessions, &["nope".to_string()], &root, "t").is_err());
+        assert!(!root.join("t (2)").exists());
+        assert_eq!(fs::read_to_string(root.join("t").join("eski.md")).unwrap(), "x");
+        let tmp2 = tempfile::tempdir().unwrap();
+        assert!(export_many(&projects, &sessions, &["nope".to_string()], &tmp2.path().join("out"), "t").is_err());
+        assert_eq!(fs::read_dir(tmp2.path().join("out")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn reveal_accepts_the_bulk_folder_and_its_files_but_not_outside_paths() {
+        i18n::set_test_lang(i18n::Lang::Tr);
+        let tmp = tempfile::tempdir().unwrap();
+        let (projects, sessions) = bulk_setup(tmp.path(), &["a"]);
+        let root = tmp.path().join("exports");
+        let r = export_many(&projects, &sessions, &["a".to_string()], &root, "toplu-x").unwrap();
+        let downloads = tmp.path().join("dl");
+        fs::create_dir_all(&downloads).unwrap();
+        assert!(reveal_target(Path::new(&r.folder), &root, &downloads).is_ok());
+        assert!(reveal_target(&projects, &root, &downloads).is_err());
+        assert!(reveal_target(&root.join("toplu-x").join("..").join("..").join("projects"), &root, &downloads).is_err());
     }
 
     #[test]

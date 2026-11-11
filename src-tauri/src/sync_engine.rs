@@ -1378,6 +1378,8 @@ mod tests {
             id: format!("id-{label}"),
             label: label.to_string(),
             custom_label: None,
+            color: None,
+            note: None,
             email: format!("{label}@example.com"),
             account_uuid: uuid.to_string(),
             org_uuid: org.to_string(),

@@ -1,0 +1,156 @@
+name: Release
+
+# v* etiketi: derle + TASLAK sürüm oluştur (yayınlamayı insan yapar).
+# Elle çalıştırma: yalnızca derle, dosyaları iş akışı çıktısı (artifact) olarak yükle.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      # Uzun derlemeden önce hızlıca düş.
+      - name: Check signing key secret
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            Write-Output '::error title=Missing secret::Repository secret TAURI_SIGNING_PRIVATE_KEY is not set (Settings > Secrets and variables > Actions).'
+            exit 1
+          }
+
+      - name: Read version (and check the tag)
+        run: |
+          $ver = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          if ([string]::IsNullOrWhiteSpace($ver)) { throw 'No version in src-tauri/tauri.conf.json' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $tagVer = $env:GITHUB_REF_NAME -replace '^v', ''
+            if ($tagVer -ne $ver) {
+              Write-Output "::error title=Version mismatch::Tag '$($env:GITHUB_REF_NAME)' does not match version '$ver' in src-tauri/tauri.conf.json."
+              exit 1
+            }
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "APP_VERSION=$ver" -Encoding utf8
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+        run: npx tauri build
+
+      - name: Stage release files
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          $ver = $env:APP_VERSION
+          $out = Join-Path $PWD 'release-assets'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          # Kaynak adlar boşluk ve & içerir; her yerde -LiteralPath kullan.
+          $setupSrc = Join-Path $PWD "src-tauri/target/release/bundle/nsis/Claude Account & Session Studio_${ver}_x64-setup.exe"
+          $sigSrc   = "$setupSrc.sig"
+          $exeSrc   = Join-Path $PWD 'src-tauri/target/release/claude-account-session-manager.exe'
+          foreach ($f in $setupSrc, $sigSrc, $exeSrc) {
+            if (-not (Test-Path -LiteralPath $f)) { throw "Build output missing: $f" }
+          }
+
+          $setupName = "Claude-Account-Session-Studio_${ver}_x64-setup.exe"
+          $exeName   = "Claude-Account-Session-Studio_${ver}_x64-portable.exe"
+          Copy-Item -LiteralPath $setupSrc -Destination (Join-Path $out $setupName)
+          Copy-Item -LiteralPath $exeSrc   -Destination (Join-Path $out $exeName)
+
+          $sig = (Get-Content -LiteralPath $sigSrc -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($sig)) { throw 'Empty .sig file' }
+
+          $latest = [ordered]@{
+            version   = $ver
+            notes     = 'See the GitHub release page for the release notes.'
+            pub_date  = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            platforms = [ordered]@{
+              'windows-x86_64' = [ordered]@{
+                signature = $sig
+                url       = "https://github.com/$($env:REPO)/releases/download/v${ver}/$setupName"
+              }
+            }
+          }
+          $json = $latest | ConvertTo-Json -Depth 5
+          [System.IO.File]::WriteAllText((Join-Path $out 'latest.json'), $json, (New-Object System.Text.UTF8Encoding($false)))
+
+          Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out $setupName), (Join-Path $out $exeName) |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path -Leaf $_.Path)" }
+          Get-ChildItem -LiteralPath $out | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Draft GitHub release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # taslak sürümü oluşturmak için
+      actions: read # gh run download için
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download build files
+        run: gh run download "$GITHUB_RUN_ID" --name release-files --dir assets
+
+      - name: Create draft release
+        run: |
+          set -euo pipefail
+          cd assets
+          ls -l
+          {
+            echo '<!-- Sürüm notlarını buraya yaz, sonra yayınla. -->'
+            echo
+            echo '## SHA-256'
+            echo
+            echo '```'
+            sha256sum -- *.exe
+            echo '```'
+            echo
+            echo 'Resmi değildir; Anthropic ile bir bağı yoktur. Dosyalar Windows kod imzası taşımıyor.'
+          } > ../release-body.md
+          cat ../release-body.md
+          gh release create "$GITHUB_REF_NAME" \
+            --draft --verify-tag \
+            --title "Claude Account & Session Studio $GITHUB_REF_NAME" \
+            --notes-file ../release-body.md \
+            ./*.exe ./latest.json

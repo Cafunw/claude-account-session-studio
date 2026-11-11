@@ -2,8 +2,8 @@ import { useState } from "react";
 import { ArrowRightLeft, CircleCheck, Clock, Gauge, Plus, RefreshCw, Users } from "lucide-react";
 import { AccountProfile } from "../types";
 import RemoveAccountDialog from "../RemoveAccountDialog";
-import { accountName, Avatar, Badge, Button, Card, formatAgo, Menu, Meter, QuotaBar, Segmented, StatCard } from "../ui";
-import { isUnknownPlan, pct, t } from "../i18n";
+import { ACCOUNT_COLORS, accountName, Avatar, Badge, Button, Card, colorBg, ColorDot, focusRing, formatAgo, Menu, Meter, QuotaBar, Segmented, StatCard } from "../ui";
+import { isUnknownPlan, Key, pct, t } from "../i18n";
 
 type QuotaView = "both" | "five" | "week";
 
@@ -24,6 +24,7 @@ function AccountRow({
   busy,
   onSwitch,
   onRename,
+  onMeta,
   first,
   last,
   onMove,
@@ -36,6 +37,7 @@ function AccountRow({
   busy: boolean;
   onSwitch: () => void;
   onRename: (label: string) => void;
+  onMeta: (color: string | null, note: string) => void;
   first: boolean;
   last: boolean;
   onMove: (direction: "up" | "down") => void;
@@ -46,6 +48,13 @@ function AccountRow({
   const finishEdit = (value: string | null) => {
     setEditing(false); // Esc passes null: leave without saving
     if (value !== null && value.trim() !== (acc.customLabel ?? "")) onRename(value);
+  };
+  // Both values are sent together, so a colour click can't overwrite a note typed a moment earlier.
+  const [meta, setMeta] = useState<{ color: string | null; note: string } | null>(null);
+  const saveMeta = (patch: Partial<{ color: string | null; note: string }>) => {
+    const next = { ...meta!, ...patch };
+    setMeta(next);
+    if (next.color !== (acc.color ?? null) || next.note.trim() !== (acc.note ?? "")) onMeta(next.color, next.note);
   };
   const { fiveHour, sevenDay, sevenDaySonnet } = acc.usage;
   const hasQuota = fiveHour || sevenDay;
@@ -82,11 +91,64 @@ function AccountRow({
               className="w-56 rounded-md border border-zinc-300 dark:border-white/15 bg-white dark:bg-[#17181c] px-2 py-0.5 text-[15px] font-semibold text-zinc-900 dark:text-zinc-100 outline-none focus:border-[#D97757] focus:ring-2 focus:ring-[#D97757]/30"
             />
           ) : (
-            <h3 className="truncate text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">{name}</h3>
+            <h3 className="flex min-w-0 items-center gap-2 text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">
+              <ColorDot color={acc.color} />
+              <span className="truncate">{name}</span>
+            </h3>
           )}
           {!isUnknownPlan(acc.planType) && <Badge>{acc.planType}</Badge>}
           {emptiest && <Badge tone="green">{t("acc.emptiest")}</Badge>}
         </div>
+        {acc.note && !meta && (
+          <p className="mt-0.5 truncate text-xs text-zinc-500 dark:text-zinc-400" title={acc.note}>
+            {acc.note}
+          </p>
+        )}
+        {meta && (
+          <div className="mt-2 space-y-2 rounded-lg border border-zinc-200 dark:border-white/10 p-2.5">
+            <div role="group" aria-label={t("acc.colorGroup")} className="flex flex-wrap items-center gap-2">
+              {ACCOUNT_COLORS.map((c) => {
+                const label = t(`acc.color.${c}` as Key);
+                return (
+                  <button
+                    key={c}
+                    type="button"
+                    aria-label={label}
+                    title={label}
+                    aria-pressed={meta.color === c}
+                    onClick={() => saveMeta({ color: c })}
+                    className={`h-5 w-5 rounded-full ${colorBg[c]} ${focusRing} ${meta.color === c ? "ring-2 ring-zinc-900 dark:ring-white ring-offset-2 ring-offset-white dark:ring-offset-[#17181c]" : ""}`}
+                  />
+                );
+              })}
+              <button
+                type="button"
+                aria-pressed={meta.color === null}
+                onClick={() => saveMeta({ color: null })}
+                className={`rounded-md px-2 py-0.5 text-xs ${focusRing} ${meta.color === null ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-white/[0.06]"}`}
+              >
+                {t("acc.colorNone")}
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={meta.note}
+                maxLength={200}
+                placeholder={t("acc.notePlaceholder")}
+                aria-label={t("acc.noteLabel")}
+                onChange={(e) => setMeta({ ...meta, note: e.target.value })}
+                onBlur={(e) => saveMeta({ note: e.currentTarget.value })}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") e.currentTarget.blur();
+                }}
+                className="min-w-0 flex-1 rounded-md border border-zinc-300 dark:border-white/15 bg-white dark:bg-[#17181c] px-2 py-1 text-xs text-zinc-900 dark:text-zinc-100 outline-none focus:border-[#D97757] focus:ring-2 focus:ring-[#D97757]/30"
+              />
+              <Button className="h-7 px-2.5 text-xs" onClick={() => setMeta(null)}>
+                {t("acc.metaDone")}
+              </Button>
+            </div>
+          </div>
+        )}
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
           {hint && <span className="truncate font-mono text-zinc-400">{hint}</span>}
           <Badge tone="green">Desktop</Badge>
@@ -130,6 +192,7 @@ function AccountRow({
           label={t("acc.actionsFor", { name })}
           items={[
             { label: t("acc.rename"), onSelect: () => setEditing(true) },
+            { label: t("acc.colorNote"), onSelect: () => setMeta({ color: acc.color ?? null, note: acc.note ?? "" }) },
             { label: t("acc.moveUp"), onSelect: () => onMove("up"), disabled: first },
             { label: t("acc.moveDown"), onSelect: () => onMove("down"), disabled: last },
             {
@@ -155,6 +218,7 @@ export default function AccountsPage({
   onAdd,
   onSwitch,
   onRename,
+  onMeta,
   onMove,
   onRemove,
 }: {
@@ -166,6 +230,7 @@ export default function AccountsPage({
   onAdd: () => void;
   onSwitch: (acc: AccountProfile) => void;
   onRename: (acc: AccountProfile, label: string) => void;
+  onMeta: (acc: AccountProfile, color: string | null, note: string) => void;
   onMove: (acc: AccountProfile, direction: "up" | "down") => void;
   onRemove: (acc: AccountProfile) => void;
 }) {
@@ -236,6 +301,7 @@ export default function AccountsPage({
             busy={busy}
             onSwitch={() => onSwitch(acc)}
             onRename={(l) => onRename(acc, l)}
+            onMeta={(c, n) => onMeta(acc, c, n)}
             first={i === 0}
             last={i === accounts.length - 1}
             onMove={(d) => onMove(acc, d)}

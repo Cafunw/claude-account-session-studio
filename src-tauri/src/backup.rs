@@ -399,62 +399,139 @@ pub fn verify_backup_integrity(backup_storage_dir: &Path, backup_id: &str) -> Re
     Ok(true)
 }
 
+/// One `claude-code-sessions/` file of a backup, as `preview_restore` sees it against the live root.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePreviewFile {
+    pub relative_path: String,
+    /// `missing` (restore would create it) | `different` (kept as it is) | `identical`.
+    pub status: String,
+    pub title: String,
+    pub last_activity_at: Option<i64>,
+    pub account_uuid: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePreview {
+    pub backup_id: String,
+    pub files: Vec<RestorePreviewFile>,
+}
+
+const SESSIONS_PREFIX: &str = "claude-code-sessions/";
+
+fn find_manifest(backup_storage_dir: &Path, backup_id: &str) -> Result<BackupManifest, String> {
+    list_backups(backup_storage_dir)
+        .into_iter()
+        .find(|b| b.id == backup_id)
+        .ok_or_else(|| format!("Backup '{backup_id}' not found"))
+}
+
+/// `missing` | `different` | `identical` for the live copy of a backup entry.
+fn live_status(dst: &Path, sha256: &str) -> Result<&'static str, String> {
+    if !dst.is_file() {
+        return Ok("missing");
+    }
+    let cur = sha256_file(dst).map_err(|e| format!("Failed hashing {}: {e}", dst.display()))?;
+    Ok(if cur.eq_ignore_ascii_case(sha256) { "identical" } else { "different" })
+}
+
+/// Read-only: verifies the backup and says, per session file, what a restore would do. Writes nothing.
+pub fn preview_restore(backup_storage_dir: &Path, backup_id: &str, target_root: &Path) -> Result<RestorePreview, String> {
+    verify_backup_integrity(backup_storage_dir, backup_id)?;
+    let manifest = find_manifest(backup_storage_dir, backup_id)?;
+    let base = PathBuf::from(&manifest.backup_dir);
+    let mut files = Vec::new();
+    for f in manifest.files.iter().filter(|f| f.relative_path.starts_with(SESSIONS_PREFIX)) {
+        let status = live_status(&target_root.join(&f.relative_path), &f.sha256)?;
+        // Not every file is a pointer, and real pointers may lack a title: fall back to the file name.
+        let v: serde_json::Value = fs::read(base.join(&f.relative_path))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let file_name = f.relative_path.rsplit('/').next().unwrap_or(&f.relative_path);
+        files.push(RestorePreviewFile {
+            relative_path: f.relative_path.clone(),
+            status: status.to_string(),
+            title: v.get("title").and_then(|t| t.as_str()).filter(|t| !t.trim().is_empty()).unwrap_or(file_name).to_string(),
+            last_activity_at: v.get("lastActivityAt").and_then(|n| n.as_i64()),
+            account_uuid: f.relative_path[SESSIONS_PREFIX.len()..].split('/').next().unwrap_or("").to_string(),
+        });
+    }
+    Ok(RestorePreview { backup_id: backup_id.to_string(), files })
+}
+
 /// Execute a non-destructive restore after user confirmation.
-/// Never overwrites existing files. Takes a pre-restore backup first,
-/// verifies SHA-256 of every backup file before restoring, and if a file already
-/// exists with different content, keeps the existing file intact.
+/// Never overwrites existing files. Takes a pre-restore backup first (only when something
+/// would be created), verifies SHA-256 of every backup file before restoring, and if a file
+/// already exists with different content, keeps the existing file intact.
+/// `only`: restore just these manifest paths (`None` = every session file of the backup).
 pub fn execute_restore(
     backup_storage_dir: &Path,
     backup_id: &str,
     target_root: &Path,
     mode: &str,
+    only: Option<&[String]>,
 ) -> Result<RestoreResult, String> {
     verify_backup_integrity(backup_storage_dir, backup_id)?;
-
-    let pre_backup = create_verified_backup(
-        target_root,
-        backup_storage_dir,
-        &format!("Pre-restore safety snapshot before restoring {backup_id}"),
-        mode,
-    )?;
-
-    let backups = list_backups(backup_storage_dir);
-    let manifest = backups
-        .into_iter()
-        .find(|b| b.id == backup_id)
-        .ok_or_else(|| format!("Backup '{backup_id}' not found"))?;
+    let manifest = find_manifest(backup_storage_dir, backup_id)?;
     let backup_base = PathBuf::from(&manifest.backup_dir);
+    let sessions: Vec<&BackupFileEntry> =
+        manifest.files.iter().filter(|f| f.relative_path.starts_with(SESSIONS_PREFIX)).collect();
 
-    let mut created_files = 0;
+    // Requested paths are only looked up in the manifest, never joined onto a directory.
+    let chosen: Vec<&BackupFileEntry> = match only {
+        None => sessions,
+        Some(paths) => {
+            let known: std::collections::HashSet<&str> = sessions.iter().map(|f| f.relative_path.as_str()).collect();
+            if let Some(bad) = paths.iter().find(|p| !known.contains(p.as_str())) {
+                return Err(format!("Restore aborted: '{bad}' is not a chat file of backup {backup_id}."));
+            }
+            let wanted: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
+            sessions.into_iter().filter(|f| wanted.contains(f.relative_path.as_str())).collect()
+        }
+    };
+
+    let mut to_create = Vec::new();
     let mut preserved_conflicts = 0;
     let mut skipped_identical = 0;
-
-    for f in &manifest.files {
-        if !f.relative_path.starts_with("claude-code-sessions/") {
-            continue;
-        }
-        let src = backup_base.join(&f.relative_path);
+    for f in chosen {
         let dst = target_root.join(&f.relative_path);
-
         if is_file_locked(&dst) {
             return Err(format!(
                 "Restore aborted: Target file {} is locked by another process.",
                 dst.display()
             ));
         }
-
-        if dst.is_file() {
-            let cur_sha = sha256_file(&dst).map_err(|e| e.to_string())?;
-            if cur_sha.eq_ignore_ascii_case(&f.sha256) {
-                skipped_identical += 1;
-                continue;
-            } else {
-                // Never overwrite existing session file!
-                preserved_conflicts += 1;
-                continue;
-            }
+        match live_status(&dst, &f.sha256)? {
+            "identical" => skipped_identical += 1,
+            // Never overwrite existing session file!
+            "different" => preserved_conflicts += 1,
+            _ => to_create.push((f, dst)),
         }
+    }
 
+    // Nothing to add: a full pre-restore snapshot would protect nothing.
+    let pre_restore_backup_id = if to_create.is_empty() {
+        String::new()
+    } else {
+        create_verified_backup(
+            target_root,
+            backup_storage_dir,
+            &format!("Pre-restore safety snapshot before restoring {backup_id}"),
+            mode,
+        )?
+        .id
+    };
+
+    let mut created_files = 0;
+    for (f, dst) in to_create {
+        // Re-check after the snapshot: a file that appeared meanwhile is never overwritten.
+        if dst.exists() {
+            preserved_conflicts += 1;
+            continue;
+        }
+        let src = backup_base.join(&f.relative_path);
         let bytes = fs::read(&src).map_err(|e| format!("Failed reading backup file {}: {e}", src.display()))?;
         atomic_write_verified(&dst, &bytes)?;
         created_files += 1;
@@ -472,7 +549,7 @@ pub fn execute_restore(
 
     Ok(RestoreResult {
         backup_id: backup_id.to_string(),
-        pre_restore_backup_id: pre_backup.id,
+        pre_restore_backup_id,
         created_files,
         preserved_conflicts,
         skipped_identical,
@@ -504,6 +581,94 @@ mod tests {
             kind: kind.map(String::from),
         };
         fs::write(d.join("backup-manifest.json"), serde_json::to_vec(&m).unwrap()).unwrap();
+    }
+
+    const ACC: &str = "11111111-2222-3333-4444-555555555555";
+
+    fn rel(name: &str) -> String {
+        format!("claude-code-sessions/{ACC}/org/{name}")
+    }
+
+    /// Live root with three pointers, backed up; then `a` is deleted (missing), `b` changed (different), `c` kept.
+    fn setup() -> (tempfile::TempDir, PathBuf, PathBuf, String) {
+        let t = tempfile::tempdir().unwrap();
+        let live = t.path().join("live");
+        let store = t.path().join("store");
+        for (n, body) in [
+            ("a.json", r#"{"title":"Chat A","lastActivityAt":1762700500000}"#),
+            ("b.json", r#"{"title":"Chat B","lastActivityAt":2}"#),
+            ("c.json", r#"{"lastActivityAt":3}"#),
+        ] {
+            let p = live.join(rel(n));
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, body).unwrap();
+        }
+        let id = create_verified_backup(&live, &store, "test", "test").unwrap().id;
+        fs::remove_file(live.join(rel("a.json"))).unwrap();
+        fs::write(live.join(rel("b.json")), "changed").unwrap();
+        (t, live, store, id)
+    }
+
+    fn backup_count(store: &Path) -> usize {
+        list_backups(store).len()
+    }
+
+    #[test]
+    fn preview_reports_missing_different_identical_and_writes_nothing() {
+        let (_t, live, store, id) = setup();
+        let before = backup_count(&store);
+        let p = preview_restore(&store, &id, &live).unwrap();
+        let by = |n: &str| p.files.iter().find(|f| f.relative_path == rel(n)).unwrap().clone();
+        assert_eq!(p.files.len(), 3);
+        let a = by("a.json");
+        assert_eq!((a.status.as_str(), a.title.as_str(), a.last_activity_at, a.account_uuid.as_str()), ("missing", "Chat A", Some(1762700500000), ACC));
+        assert_eq!(by("b.json").status, "different");
+        let c = by("c.json");
+        assert_eq!((c.status.as_str(), c.title.as_str()), ("identical", "c.json"));
+        assert!(!live.join(rel("a.json")).exists());
+        assert_eq!(backup_count(&store), before);
+    }
+
+    #[test]
+    fn selective_restore_creates_only_the_chosen_file_and_keeps_different_ones() {
+        let (_t, live, store, id) = setup();
+        // A second missing file that is not chosen.
+        fs::remove_file(live.join(rel("c.json"))).unwrap();
+        let r = execute_restore(&store, &id, &live, "test", Some(&[rel("a.json"), rel("b.json")])).unwrap();
+        assert_eq!((r.created_files, r.preserved_conflicts, r.skipped_identical), (1, 1, 0));
+        assert!(!r.pre_restore_backup_id.is_empty());
+        assert_eq!(fs::read_to_string(live.join(rel("a.json"))).unwrap(), r#"{"title":"Chat A","lastActivityAt":1762700500000}"#);
+        assert_eq!(fs::read(live.join(rel("b.json"))).unwrap(), b"changed");
+        assert!(!live.join(rel("c.json")).exists());
+    }
+
+    #[test]
+    fn restore_rejects_paths_outside_the_manifest_before_writing() {
+        let (_t, live, store, id) = setup();
+        let before = backup_count(&store);
+        let abs = live.join("x.json").to_string_lossy().into_owned();
+        for bad in [r"..\x".to_string(), "claude-code-sessions/../x.json".into(), abs, "config.json".into()] {
+            let err = execute_restore(&store, &id, &live, "test", Some(&[rel("a.json"), bad.clone()])).unwrap_err();
+            assert!(err.contains("not a chat file"), "{bad}: {err}");
+        }
+        assert!(!live.join(rel("a.json")).exists());
+        assert_eq!(backup_count(&store), before);
+    }
+
+    #[test]
+    fn restore_with_nothing_missing_takes_no_pre_restore_backup() {
+        let (_t, live, store, id) = setup();
+        let before = backup_count(&store);
+        let r = execute_restore(&store, &id, &live, "test", Some(&[])).unwrap();
+        assert_eq!((r.created_files, r.pre_restore_backup_id.as_str()), (0, ""));
+        assert_eq!(backup_count(&store), before);
+        // Full restore brings `a` back (one snapshot); a second one has nothing missing: no snapshot.
+        execute_restore(&store, &id, &live, "test", None).unwrap();
+        assert_eq!(backup_count(&store), before + 1);
+        let r = execute_restore(&store, &id, &live, "test", None).unwrap();
+        assert_eq!((r.created_files, r.preserved_conflicts, r.skipped_identical, r.pre_restore_backup_id.as_str()), (0, 1, 2, ""));
+        assert_eq!(backup_count(&store), before + 1);
+        assert_eq!(fs::read(live.join(rel("b.json"))).unwrap(), b"changed");
     }
 
     #[test]

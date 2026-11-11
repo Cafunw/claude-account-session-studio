@@ -44,6 +44,10 @@ npx tauri build
 
 Kurulum dosyası `src-tauri/target/release/bundle/nsis/` altında oluşur.
 
+## Sürüm derleme
+
+`v1.2.3` gibi bir etiket (tag) gönderilince GitHub Actions ([`release.yml`](.github/workflows/release.yml)) kurulum ve taşınabilir exe'yi derler, `latest.json` ile SHA-256 toplamlarını üretir ve **taslak** bir sürüm oluşturur; notları yazıp yayınlamak elle yapılır. Etiket, `src-tauri/tauri.conf.json` içindeki sürümle aynı olmalıdır. Güncelleme imzası için özel anahtar, depo sırrı olarak `TAURI_SIGNING_PRIVATE_KEY` adıyla tutulur (Settings → Secrets and variables → Actions). Etiketsiz deneme için Actions sekmesinden *Release* iş akışı elle çalıştırılabilir; dosyalar sürüm yerine iş akışı çıktısı olarak yüklenir.
+
 ## Örnek verilerle önizleme
 
 ```bash
@@ -115,6 +119,10 @@ npx tauri build
 ```
 
 The installer is created under `src-tauri/target/release/bundle/nsis/`.
+
+### Building a release
+
+Pushing a tag such as `v1.2.3` makes GitHub Actions ([`release.yml`](.github/workflows/release.yml)) build the installer and the portable exe, generate `latest.json` and the SHA-256 sums, and create a **draft** release; writing the notes and publishing it is done by hand. The tag must equal the version in `src-tauri/tauri.conf.json`. The private key for the update signature is kept as the repository secret `TAURI_SIGNING_PRIVATE_KEY` (Settings → Secrets and variables → Actions). For a dry run without a tag, start the *Release* workflow by hand from the Actions tab; the files are then uploaded as a workflow artifact instead of a release.
 
 ### Preview with sample data
 

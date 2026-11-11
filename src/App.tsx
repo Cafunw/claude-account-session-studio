@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Coins,
+  HardDrive,
   HeartPulse,
   Loader2,
   MessagesSquare,
@@ -15,19 +16,22 @@ import {
   ShieldAlert,
   Users,
 } from "lucide-react";
-import { AccountProfile, AutomationSettings, FullDashboardPayload, HealthReport, PendingChat, SwitchPlan } from "./types";
+import { AccountProfile, AutomationSettings, FullDashboardPayload, HealthReport, PendingChat, SwitchPlan, SwitchSuggested } from "./types";
 import { accountName, formatAgo, focusRing } from "./ui";
 import { Logo } from "./Logo";
 import AccountsPage from "./pages/Accounts";
 import ChatsPage, { Selection } from "./pages/Chats";
 import BackupsPage from "./pages/Backups";
+import DiskPage from "./pages/Disk";
 import HealthPage from "./pages/Health";
 import JournalPage from "./pages/Journal";
 import SettingsPage from "./pages/Settings";
 import UsageHistoryPage from "./pages/UsageHistory";
 import SpendingPage from "./pages/Spending";
 import SwitchDialog from "./SwitchDialog";
+import RestoreDialog from "./RestoreDialog";
 import UpdateBanner from "./UpdateBanner";
+import SwitchSuggestion from "./SwitchSuggestion";
 import { useTheme } from "./theme";
 import { getLang, setLang, t } from "./i18n";
 
@@ -38,6 +42,7 @@ const PAGES = [
   { id: "spending", icon: Coins },
   { id: "chats", icon: MessagesSquare },
   { id: "backups", icon: Archive },
+  { id: "disk", icon: HardDrive },
   { id: "health", icon: HeartPulse },
   { id: "journal", icon: ScrollText },
   { id: "settings", icon: Settings },
@@ -55,7 +60,9 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useTheme();
   const [plan, setPlan] = useState<{ acc: AccountProfile; pending: PendingChat[] } | null>(null);
+  const [restoreId, setRestoreId] = useState<string | null>(null);
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
+  const [suggestion, setSuggestion] = useState<SwitchSuggested | null>(null);
   // Before the first payload the browser's language stands in.
   if (data) setLang(data.effectiveLanguage);
   const lang = getLang();
@@ -96,6 +103,7 @@ export default function App() {
       }),
       listen("sessions-synced", () => fetchState()),
       listen<{ version: string }>("update-available", (event) => setUpdateVersion(event.payload.version)),
+      listen<SwitchSuggested>("switch-suggested", (event) => setSuggestion(event.payload)),
       listen("account-detected", () => {
         fetchState();
         setToast({
@@ -137,6 +145,22 @@ export default function App() {
     }
   };
   const handleExport = (cliSessionId: string) => saveFile(() => invoke<string>("export_chat_markdown", { cliSessionId }));
+  const handleExportMany = async (cliSessionIds: string[]) => {
+    try {
+      const r = await invoke<import("./types").BulkExport>("export_chats_markdown", { cliSessionIds });
+      const skipped = r.skipped.length ? ` · ${t("chats.exportSkipped", { n: r.skipped.length })}` : "";
+      setToast({
+        type: "success",
+        message: t("chats.exportedMany", { chats: t("count.chats", { n: r.exported }) }) + skipped,
+        action: {
+          label: t("chats.revealFolder"),
+          run: () => invoke("reveal_in_explorer", { path: r.folder }).catch((e) => setToast({ type: "error", message: String(e) })),
+        },
+      });
+    } catch (e: any) {
+      setToast({ type: "error", message: String(e) });
+    }
+  };
 
   // Runs a long backend action behind the progress overlay.
   const runAction = async (firstStep: string, action: () => Promise<void>) => {
@@ -163,11 +187,13 @@ export default function App() {
     }
   };
 
-  const doSwitch = (acc: AccountProfile, extraChats: string[]) =>
-    runAction(t("progress.closing"), async () => {
+  const doSwitch = (acc: AccountProfile, extraChats: string[]) => {
+    setSuggestion(null);
+    return runAction(t("progress.closing"), async () => {
       setData(await invoke<FullDashboardPayload>("one_click_switch_account", { targetAccountUuid: acc.accountUuid, extraChats }));
       setToast({ type: "success", message: t("toast.switched", { name: accountName(acc).name }) });
     });
+  };
 
   // Uses only setters, so the first render's copy held by the event listener stays correct.
   const handleSwitch = async (acc: AccountProfile) => {
@@ -183,6 +209,14 @@ export default function App() {
   const handleRename = async (acc: AccountProfile, label: string) => {
     try {
       setData(await invoke<FullDashboardPayload>("rename_account", { accountUuid: acc.accountUuid, label }));
+    } catch (e: any) {
+      setToast({ type: "error", message: String(e) });
+    }
+  };
+
+  const handleMeta = async (acc: AccountProfile, color: string | null, note: string) => {
+    try {
+      setData(await invoke<FullDashboardPayload>("set_account_meta", { accountUuid: acc.accountUuid, color, note }));
     } catch (e: any) {
       setToast({ type: "error", message: String(e) });
     }
@@ -265,9 +299,9 @@ export default function App() {
     }
   };
 
-  const handleRestoreBackup = (backupId: string) =>
+  const handleRestoreBackup = (backupId: string, files: string[]) =>
     runAction(t("progress.verifyingBackup"), async () => {
-      const res = await invoke<any>("execute_safe_restore", { backupId });
+      const res = await invoke<any>("execute_safe_restore", { backupId, files });
       await fetchState();
       setToast({
         type: "success",
@@ -299,6 +333,9 @@ export default function App() {
   const accounts = data ? data.accounts : []; // already in the user's stored order
   const counts: Partial<Record<PageId, number>> = data ? { chats: data.sessions.length, backups: data.backups.length } : {};
   const running = !!data?.environment.desktopRunning;
+  // Only while the suggestion still fits: the account is still active and the target still exists.
+  const sugFrom = suggestion && accounts.find((a) => a.accountUuid === suggestion.fromUuid && a.isActive);
+  const sugTo = suggestion && accounts.find((a) => a.accountUuid === suggestion.toUuid);
 
   return (
     <div className="flex h-[100dvh] overflow-hidden bg-[#F6F6F7] dark:bg-[#111214] text-zinc-900 dark:text-zinc-100">
@@ -391,6 +428,10 @@ export default function App() {
             />
           )}
 
+          {suggestion && sugFrom && sugTo && !plan && !progressStep && (
+            <SwitchSuggestion suggestion={suggestion} from={sugFrom} to={sugTo} onSwitch={handleSwitch} onDismiss={() => setSuggestion(null)} />
+          )}
+
           <header className="mb-6 flex items-center gap-4">
             <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-sky-200 dark:border-sky-400/25 bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300">
               <current.icon className="h-6 w-6" aria-hidden />
@@ -421,17 +462,20 @@ export default function App() {
               onAdd={handleAddAccount}
               onSwitch={handleSwitch}
               onRename={handleRename}
+              onMeta={handleMeta}
               onMove={handleMove}
               onRemove={handleRemove}
             />
           ) : page === "history" ? (
             <UsageHistoryPage accounts={accounts} threshold={data.automation.switchThresholdPercent} />
           ) : page === "spending" ? (
-            <SpendingPage saveFile={saveFile} />
+            <SpendingPage saveFile={saveFile} automation={data.automation} onDashboard={setData} />
           ) : page === "chats" ? (
-            <ChatsPage data={data} accounts={accounts} saveSelection={saveSelection} onOpenSettings={() => setPage("settings")} onExport={handleExport} />
+            <ChatsPage data={data} accounts={accounts} saveSelection={saveSelection} onOpenSettings={() => setPage("settings")} onExport={handleExport} onExportMany={handleExportMany} />
           ) : page === "backups" ? (
-            <BackupsPage backups={data.backups} busy={!!progressStep} onBackup={handleManualBackup} onRestore={handleRestoreBackup} />
+            <BackupsPage backups={data.backups} busy={!!progressStep} onBackup={handleManualBackup} onRestore={setRestoreId} />
+          ) : page === "disk" ? (
+            <DiskPage notify={notify} />
           ) : page === "health" ? (
             <HealthPage health={health} busy={healthBusy} onCheck={handleHealthCheck} />
           ) : page === "journal" ? (
@@ -467,6 +511,18 @@ export default function App() {
           onConfirm={(extraChats) => {
             setPlan(null);
             doSwitch(plan.acc, extraChats);
+          }}
+        />
+      )}
+
+      {restoreId && data?.backups.some((b) => b.id === restoreId) && (
+        <RestoreDialog
+          backup={data.backups.find((b) => b.id === restoreId)!}
+          accounts={data.accounts}
+          onCancel={() => setRestoreId(null)}
+          onConfirm={(files) => {
+            setRestoreId(null);
+            handleRestoreBackup(restoreId, files);
           }}
         />
       )}

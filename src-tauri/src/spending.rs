@@ -943,14 +943,146 @@ pub fn spawn_warmup(app: AppHandle) {
             }
         };
         let progress = |d, t| emit_progress(&app, d, t);
-        let mut store = store().lock().unwrap_or_else(|e| e.into_inner());
-        load(&mut store, &state.studio_dir);
-        let now = chrono::Utc::now().timestamp_millis();
-        let run = Run { threads: threads(!URGENT.load(Ordering::Relaxed)), low: true, pause: &pause, progress: &progress };
-        if refresh(&mut store, &crate::chat_text::cli_projects_dir(), now - WARMUP_DAYS * DAY_MS, MAX_FILE_BYTES, &run).dirty {
-            let _ = save(&store, &state.studio_dir);
+        {
+            let mut store = store().lock().unwrap_or_else(|e| e.into_inner());
+            load(&mut store, &state.studio_dir);
+            let now = chrono::Utc::now().timestamp_millis();
+            let run = Run { threads: threads(!URGENT.load(Ordering::Relaxed)), low: true, pause: &pause, progress: &progress };
+            if refresh(&mut store, &crate::chat_text::cli_projects_dir(), now - WARMUP_DAYS * DAY_MS, MAX_FILE_BYTES, &run).dirty {
+                let _ = save(&store, &state.studio_dir);
+            }
+        }
+        loop {
+            check_budget(&app);
+            std::thread::sleep(BUDGET_EVERY);
         }
     });
+}
+
+const BUDGET_EVERY: Duration = Duration::from_secs(600);
+
+/// Cost (USD at list prices) of today and of the last 7 local days, each summed exactly like the
+/// page's "today" and "7" reports (same window start, same dedupe), so the numbers match.
+fn budget_spent<Tz: TimeZone>(store: &Store, scan: &Scan, now: i64, tz: &Tz) -> [f64; 2] {
+    ["today", "7"].map(|range| {
+        let mut usd = 0.0;
+        each_slot(store, scan, MAX_FILE_BYTES, window(range, now, tz).0, now, |_, s, t, _| {
+            usd += price(&s.m).map_or(0.0, |p| cost(&t, p).total);
+        });
+        usd
+    })
+}
+
+/// Brings the last 7 days up to date (incrementally, like the warm-up: low priority, pausing while
+/// `op_lock` is busy but never taking it) and returns `budget_spent`.
+fn spent_now(app: &AppHandle, low: bool) -> [f64; 2] {
+    let state = app.state::<AppState>();
+    let pause = || {
+        while matches!(state.op_lock.try_lock(), Err(TryLockError::WouldBlock)) {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    };
+    let progress = |d, t| emit_progress(app, d, t);
+    let mut store = store().lock().unwrap_or_else(|e| e.into_inner());
+    load(&mut store, &state.studio_dir);
+    let now = chrono::Utc::now().timestamp_millis();
+    let run = Run { threads: threads(low && !URGENT.load(Ordering::Relaxed)), low, pause: &pause, progress: &progress };
+    let scan = refresh(&mut store, &crate::chat_text::cli_projects_dir(), window("7", now, &chrono::Local).0, MAX_FILE_BYTES, &run);
+    if scan.dirty {
+        let _ = save(&store, &state.studio_dir);
+    }
+    budget_spent(&store, &scan, now, &chrono::Local)
+}
+
+/// What was last announced per limit (daily, weekly): the local day and the limit at that time.
+pub type Announced = [Option<(NaiveDate, f64)>; 2];
+
+/// Indexes (0 daily, 1 weekly) of the limits to announce now, updating `announced`. A limit that is
+/// reached is announced once per local day; lowering it later that day announces again.
+pub fn budget_due(announced: &mut Announced, today: NaiveDate, spent: [f64; 2], limits: [f64; 2]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for i in 0..2 {
+        let (spent, limit) = (spent[i], limits[i]);
+        let quiet = announced[i].is_some_and(|(day, at)| day == today && limit >= at);
+        if limit > 0.0 && spent >= limit && !quiet {
+            announced[i] = Some((today, limit));
+            out.push(i);
+        }
+    }
+    out
+}
+
+fn budget_lines(due: &[usize], spent: [f64; 2], limits: [f64; 2]) -> String {
+    let mut lines: Vec<String> = due
+        .iter()
+        .map(|&i| {
+            let (s, l) = (spent[i], limits[i]);
+            if i == 0 {
+                crate::i18n::t(format!("Bugün: ≈ ${s:.2} (limit ${l:.2})"), format!("Today: ≈ ${s:.2} (limit ${l:.2})"))
+            } else {
+                crate::i18n::t(format!("Son 7 gün: ≈ ${s:.2} (limit ${l:.2})"), format!("Last 7 days: ≈ ${s:.2} (limit ${l:.2})"))
+            }
+        })
+        .collect();
+    lines.push(crate::i18n::t("API liste fiyatlarıyla yapılan bir tahmindir.", "An estimate at API list prices.").to_string());
+    lines.join("\n")
+}
+
+/// Checks both limits and shows one notification for those just reached. Also run right after the
+/// limits change, so lowering one below today's spending is announced at once.
+pub fn check_budget(app: &AppHandle) {
+    // shortcut: kept in memory, so a restart may announce a limit again the same day; persist it if that annoys.
+    static ANNOUNCED: Mutex<Announced> = Mutex::new([None, None]);
+    let limits = match app.state::<AppState>().config.lock() {
+        Ok(c) => [c.automation.budget_daily_usd, c.automation.budget_weekly_usd],
+        Err(_) => return,
+    };
+    if limits.iter().all(|l| *l <= 0.0) {
+        return;
+    }
+    let spent = spent_now(app, true);
+    let today = chrono::Local::now().date_naive();
+    let due = budget_due(&mut ANNOUNCED.lock().unwrap_or_else(|e| e.into_inner()), today, spent, limits);
+    if !due.is_empty() {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = app
+            .notification()
+            .builder()
+            .title(crate::i18n::t("Harcama bütçesi aşıldı", "Spending budget exceeded"))
+            .body(budget_lines(&due, spent, limits))
+            .show();
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetSpent {
+    pub today: f64,
+    pub week: f64,
+}
+
+/// Today's and the last 7 days' cost for the budget card, whatever range the page shows.
+#[tauri::command(async)]
+pub fn get_spending_budget(app: AppHandle) -> BudgetSpent {
+    URGENT.store(true, Ordering::Relaxed);
+    let [today, week] = spent_now(&app, false);
+    BudgetSpent { today, week }
+}
+
+/// Project folder name -> cwd, from the cache only (no transcript is read). Empty while a scan holds
+/// the cache or before it was loaded.
+pub(crate) fn cached_project_cwds(projects_dir: &Path) -> HashMap<String, String> {
+    let Ok(store) = store().try_lock() else { return HashMap::new() };
+    let mut out = HashMap::new();
+    for (path, rec) in &store.files {
+        let Ok(rel) = path.strip_prefix(projects_dir) else { continue };
+        let Some(folder) = rel.components().next().and_then(|c| c.as_os_str().to_str()) else { continue };
+        let cwd = if rec.cwd.is_empty() { rec.slots.iter().rev().find(|s| !s.c.is_empty()).map(|s| s.c.as_str()) } else { Some(rec.cwd.as_str()) };
+        if let Some(cwd) = cwd {
+            out.entry(folder.to_string()).or_insert_with(|| cwd.to_string());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1034,6 +1166,56 @@ mod tests {
             }
         }
         sum
+    }
+
+    #[test]
+    fn budget_is_announced_once_a_day_per_limit() {
+        let d1 = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+        let d2 = d1.succ_opt().unwrap();
+        let mut a: Announced = [None, None];
+        // Below both limits, and a limit of 0 never announces.
+        assert!(budget_due(&mut a, d1, [4.0, 30.0], [5.0, 0.0]).is_empty());
+        // Crossing announces once; the same day stays silent.
+        assert_eq!(budget_due(&mut a, d1, [6.0, 30.0], [5.0, 0.0]), [0]);
+        assert!(budget_due(&mut a, d1, [9.0, 30.0], [5.0, 0.0]).is_empty());
+        // Raising the limit but still over, same day: silent.
+        assert!(budget_due(&mut a, d1, [9.0, 30.0], [8.0, 0.0]).is_empty());
+        // Lowering the weekly limit below current spending announces it.
+        assert_eq!(budget_due(&mut a, d1, [9.0, 30.0], [8.0, 20.0]), [1]);
+        // Lowering an already announced limit further the same day announces again.
+        assert_eq!(budget_due(&mut a, d1, [9.0, 30.0], [3.0, 20.0]), [0]);
+        // Next day, still over: both again.
+        assert_eq!(budget_due(&mut a, d2, [9.0, 30.0], [3.0, 20.0]), [0, 1]);
+        // Turned off: nothing, even though spending is over.
+        assert!(budget_due(&mut [None, None], d2, [9.0, 30.0], [0.0, 0.0]).is_empty());
+    }
+
+    #[test]
+    fn budget_matches_the_today_and_7_day_reports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opus = "claude-opus-5-5";
+        let today_start = window("today", now(), &Utc).0;
+        write(tmp.path(), "p1/c1.jsonl", &[
+            asst_at("m1", now().max(today_start + 1000) - 1000, "C:\\a", opus, 1_000_000, 0, 0, 0),
+            asst("m2", 3.0, "C:\\a", opus, 0, 1_000_000, 0, 0),
+            asst("old", 9.0, "C:\\a", opus, 5_000_000, 0, 0, 0),
+        ]);
+        // A resumed chat repeats m2 in a later file: counted once.
+        write(tmp.path(), "p1/c2.jsonl", &[asst("m2", 3.0, "C:\\a", opus, 0, 1_000_000, 0, 0)]);
+        let mut store = Store::default();
+        let scan = refresh(&mut store, tmp.path(), window("7", now(), &Utc).0, MAX_FILE_BYTES, &quiet(2));
+        let [today, week] = budget_spent(&store, &scan, now(), &Utc);
+        let page = |range| run(tmp.path(), &HashMap::new(), range, MAX_FILE_BYTES).totals.cost.total;
+        assert_eq!((today, week), (page("today"), page("7")));
+        assert!((today - 4.0).abs() < 1e-9 && (week - 24.0).abs() < 1e-9, "{today} {week}");
+    }
+
+    #[test]
+    fn budget_notification_text() {
+        crate::i18n::set_test_lang(crate::i18n::Lang::Tr);
+        assert_eq!(budget_lines(&[0, 1], [12.5, 40.0], [10.0, 30.0]), "Bugün: ≈ $12.50 (limit $10.00)\nSon 7 gün: ≈ $40.00 (limit $30.00)\nAPI liste fiyatlarıyla yapılan bir tahmindir.");
+        crate::i18n::set_test_lang(crate::i18n::Lang::En);
+        assert_eq!(budget_lines(&[1], [12.5, 40.0], [10.0, 30.0]), "Last 7 days: ≈ $40.00 (limit $30.00)\nAn estimate at API list prices.");
     }
 
     #[test]

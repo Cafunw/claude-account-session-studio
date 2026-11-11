@@ -45,7 +45,25 @@ function ExportButton({ title, onClick }: { title: string; onClick: () => void }
   );
 }
 
-const checkboxClass = `h-4 w-4 shrink-0 cursor-pointer rounded accent-[#D97757] disabled:cursor-default disabled:opacity-40 ${focusRing}`;
+const MAX_BULK = 500; // keep in sync with MAX_BULK_CHATS in chat_text.rs
+const idsOf = (list: SessionRecord[]) => [...new Set(list.flatMap((s) => (s.cliSessionId ? [s.cliSessionId] : [])))];
+
+function GroupExportButton({ name, busy, disabled, onClick }: { name: string; busy: boolean; disabled: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={t("chats.exportGroup")}
+      aria-label={t("chats.exportGroupAria", { name })}
+      className={`shrink-0 rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent dark:hover:bg-white/10 dark:hover:text-zinc-200 ${focusRing}`}
+    >
+      {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <FileDown className="h-4 w-4" aria-hidden />}
+    </button>
+  );
+}
+
+const checkboxClass =`h-4 w-4 shrink-0 cursor-pointer rounded accent-[#D97757] disabled:cursor-default disabled:opacity-40 ${focusRing}`;
 
 export default function ChatsPage({
   data,
@@ -53,13 +71,24 @@ export default function ChatsPage({
   saveSelection,
   onOpenSettings,
   onExport,
+  onExportMany,
 }: {
   data: FullDashboardPayload;
   accounts: AccountProfile[];
   saveSelection: (patch: Partial<Selection>) => void;
   onOpenSettings: () => void;
   onExport: (cliSessionId: string) => void;
+  onExportMany: (cliSessionIds: string[]) => Promise<void>;
 }) {
+  const [bulkBusy, setBulkBusy] = useState<string | null>(null); // key of the running bulk export; all bulk buttons lock meanwhile
+  const runBulk = async (key: string, ids: string[]) => {
+    setBulkBusy(key);
+    try {
+      await onExportMany(ids);
+    } finally {
+      setBulkBusy(null);
+    }
+  };
   const [searchQuery, setSearchQuery] = useState("");
   const [mode, setMode] = useState<"title" | "content">("title");
   const [hits, setHits] = useState<SearchHit[] | null>(null);
@@ -197,14 +226,29 @@ export default function ChatsPage({
     );
   };
 
-  const groupRow = (key: string, label: React.ReactNode, count: number, checkbox: React.ReactNode, chips: React.ReactNode, title?: string) => (
+  const groupRow = (key: string, label: React.ReactNode, count: number, checkbox: React.ReactNode, chips: React.ReactNode, title?: string, exportBtn?: React.ReactNode) => (
     <li key={key} className="flex items-center gap-3 bg-zinc-50/70 dark:bg-white/[0.03] px-4 py-2.5" title={title}>
       {checkbox}
       {label}
       <span className="flex-1 text-xs tabular-nums text-zinc-400">{count}</span>
       {chips}
+      {exportBtn}
     </li>
   );
+
+  const groupExport = (key: string, name: string, items: SessionRecord[]) => {
+    const ids = idsOf(items);
+    return (
+      <GroupExportButton
+        name={name}
+        busy={bulkBusy === key}
+        disabled={bulkBusy !== null || ids.length === 0 || ids.length > MAX_BULK}
+        onClick={() => runBulk(key, ids)}
+      />
+    );
+  };
+  const visibleIds = mode === "content" ? (hits ?? []).map((h) => h.cliSessionId) : idsOf(filteredSessions);
+  const tooMany = visibleIds.length > MAX_BULK;
 
   return (
     <div className="space-y-4">
@@ -260,6 +304,18 @@ export default function ChatsPage({
             {t("chats.help")}
           </p>
         )}
+        <div className="flex items-center justify-end gap-3 border-t border-zinc-100 dark:border-white/[0.06] px-4 py-2">
+          {tooMany && <span className="text-pretty text-xs text-zinc-500 dark:text-zinc-400">{t("chats.exportLimit", { max: MAX_BULK })}</span>}
+          <button
+            type="button"
+            onClick={() => runBulk("all", visibleIds)}
+            disabled={bulkBusy !== null || visibleIds.length === 0 || tooMany}
+            className={`inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-800 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent dark:text-zinc-300 dark:hover:bg-white/10 dark:hover:text-zinc-100 ${focusRing}`}
+          >
+            {bulkBusy === "all" ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <FileDown className="h-3.5 w-3.5" aria-hidden />}
+            {t("chats.exportAll", { n: visibleIds.length })}
+          </button>
+        </div>
       </Card>
 
       {mode === "content" ? (
@@ -306,7 +362,9 @@ export default function ChatsPage({
                     className={checkboxClass}
                   />
                 ),
-                selecting && sel.selectedGroups.includes(g.id) && targetChips(`group:${g.id}`)
+                selecting && sel.selectedGroups.includes(g.id) && targetChips(`group:${g.id}`),
+                undefined,
+                groupExport(`g-${g.id}`, g.name, items)
               )}
               {items.map((s) => sessionRow(s, true))}
             </React.Fragment>
@@ -331,7 +389,8 @@ export default function ChatsPage({
                     className={checkboxClass}
                   />,
                   picked && targetChips(`folder:${key}`),
-                  path
+                  path,
+                  groupExport(`f-${key}`, name, items)
                 )}
                 {items.map((s) => sessionRow(s, true))}
               </React.Fragment>

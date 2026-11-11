@@ -2,7 +2,7 @@
 // main.tsx imports this behind `import.meta.env.DEV`, so it never reaches the production bundle.
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
-import { AccountProfile, EnvironmentReport, FullDashboardPayload, HealthReport, PendingChat, SessionRecord, SpendingRange, SpendingReport, TokenSums, UsageHistory } from "./types";
+import { AccountProfile, DiskUsage, EnvironmentReport, FullDashboardPayload, HealthReport, PendingChat, SessionRecord, SpendingRange, SpendingReport, TokenSums, UsageHistory } from "./types";
 
 const now = Date.now();
 const iso = (msFromNow: number) => new Date(now + msFromNow).toISOString();
@@ -79,6 +79,8 @@ const state: FullDashboardPayload = {
     confirmBeforeDesktopRestart: false,
     transferMode: "ask",
     autoUpdate: true,
+    budgetDailyUsd: 0,
+    budgetWeeklyUsd: 0,
     selectedChats: ["cli-mock-9"],
     selectedGroups: ["grp-1"],
     selectedFolders: ["c:\\projeler\\api-servisi"],
@@ -92,6 +94,8 @@ const state: FullDashboardPayload = {
       accountUuid: U1,
       email: "ornek.is@example.com",
       customLabel: "İş hesabı",
+      color: "blue",
+      note: "Ana çalışma hesabı",
       planType: "Claude Max 20x",
       hasDpapiCredentials: true,
       isActive: true,
@@ -245,6 +249,22 @@ export function installDevMock() {
         case "export_spending_csv":
           await sleep(300);
           return `C:\\Users\\demo\\Downloads\\claude-harcama-${{ today: "bugun", all: "tum-zamanlar" }[args.range as string] ?? `${args.range}-gun`}-${new Date().toISOString().slice(0, 10)}.csv`;
+        case "get_spending_budget":
+          // The same totals the page shows for "today" and "7".
+          await sleep(200);
+          return location.search.includes("bos") ? { today: 0, week: 0 } : { today: spending("today").totals.cost.total, week: spending("7").totals.cost.total };
+        case "set_spending_budget": {
+          const ok = (v: number) => Number.isFinite(v) && v >= 0 && v <= 100000;
+          if (!ok(args.daily) || !ok(args.weekly)) throw L("Bütçe 0 ile 100000 USD arasında olmalı.", "The budget must be between 0 and 100000 USD.");
+          state.automation.budgetDailyUsd = args.daily;
+          state.automation.budgetWeeklyUsd = args.weekly;
+          return snap();
+        }
+        case "get_disk_usage":
+          await sleep(500);
+          return location.search.includes("bos") ? emptyDisk() : disk();
+        case "reveal_disk_folder":
+          return null;
         case "refresh_all_usage":
           await sleep(700);
           return {
@@ -301,6 +321,16 @@ export function installDevMock() {
           }
           return snap();
         }
+        case "set_account_meta": {
+          const a = state.accounts.find((x) => x.accountUuid === args.accountUuid);
+          if (!a) throw L("Hesap bulunamadı.", "Account not found.");
+          const note = String(args.note).trim();
+          if (args.color !== null && !["red", "orange", "amber", "green", "teal", "blue", "violet", "pink"].includes(args.color)) throw L("Geçersiz renk.", "Invalid colour.");
+          if ([...note].length > 200) throw L("Not en fazla 200 karakter olabilir.", "The note can be at most 200 characters.");
+          a.color = args.color;
+          a.note = note || null;
+          return snap();
+        }
         case "remove_account": {
           const a = state.accounts.find((x) => x.accountUuid === args.accountUuid);
           if (!a) throw L("Hesap bulunamadı.", "Account not found.");
@@ -326,7 +356,28 @@ export function installDevMock() {
           return null;
         case "execute_safe_restore":
           await sleep(800);
-          return { createdFiles: 2 };
+          return { createdFiles: args.files ? args.files.length : 2 };
+        case "preview_restore": {
+          await sleep(600);
+          const f = (uuid: string, name: string, status: string, title: string, ago: number | null) => ({
+            relativePath: `claude-code-sessions/${uuid}/org/${name}.json`,
+            status,
+            title,
+            lastActivityAt: ago === null ? null : now - ago,
+            accountUuid: uuid,
+          });
+          return {
+            backupId: args.backupId,
+            files: [
+              f(U1, "local_r1", "missing", "Fatura modülünü yeniden yaz", 3 * 3600_000),
+              f(U2, "local_r2", "missing", "Mobil giriş hatası", 26 * 3600_000),
+              f("9d2e41aa-0000-4000-8000-000000000000", "local_r3", "missing", "local_r3.json", null),
+              f(U1, "local_r4", "different", "API sınırları", 5 * 3600_000),
+              f(U1, "local_r5", "identical", "Rapor taslağı", 50 * 3600_000),
+              f(U2, "local_r6", "identical", "Test planı", 70 * 3600_000),
+            ],
+          };
+        }
         case "run_health_check":
           await sleep(900);
           return health();
@@ -349,6 +400,15 @@ export function installDevMock() {
           const c = state.sessions.find((x) => x.cliSessionId === args.cliSessionId);
           return `C:\\Users\\ornek\\Downloads\\Claude Sohbetleri\\${c?.title ?? L("Sohbet", "Chat")} (2025-01-15).md`;
         }
+        case "export_chats_markdown": {
+          await sleep(600);
+          const ids = [...new Set(args.cliSessionIds as string[])];
+          if (ids.length > 500) throw L("Tek seferde en fazla 500 sohbet kaydedilebilir; seçimi daralt.", "At most 500 chats can be saved at once; narrow the selection.");
+          const found = state.sessions.filter((x) => x.cliSessionId && ids.includes(x.cliSessionId));
+          if (found.length === 0) throw L("Hiçbir sohbet kaydedilemedi: Sohbet bulunamadı.", "No chat could be saved: Chat not found.");
+          const skipped = ids.length > found.length ? [{ title: ids.find((i) => !found.some((x) => x.cliSessionId === i)) ?? "", reason: L("Bu sohbetin içeriği diskte yok.", "This chat's content is not on disk.") }] : [];
+          return { folder: "C:\\Users\\ornek\\Downloads\\Claude Sohbetleri\\toplu-2025-01-15-1030", exported: found.length, skipped };
+        }
         case "reveal_in_explorer":
           console.info("[devMock] reveal", args.path);
           return null;
@@ -361,6 +421,9 @@ export function installDevMock() {
   );
   // Open the preview with ?secim to see the tray's "switch-choice-needed" flow.
   if (location.search.includes("secim")) setTimeout(() => emit("switch-choice-needed", { targetAccountUuid: U2 }), 800);
+  // Open the preview with ?oneri to see the in-app "switch to the emptier account" banner.
+  if (location.search.includes("oneri"))
+    setTimeout(() => emit("switch-suggested", { fromUuid: U1, toUuid: U2, window: L("5 saatlik", "5-hour"), pct: 92, toPct: 18 }), 800);
   // The background check's banner; the real app sends it at most once per version.
   setTimeout(() => emit("update-available", { version: "1.1.0" }), 1200);
 
@@ -451,6 +514,30 @@ const scaleTokens = (tk: TokenSums, f: number): TokenSums => {
   const s = split(Math.round(tk.work * f), 0);
   return { ...s, cacheRead: Math.round(tk.cacheRead * f), total: s.work + Math.round(tk.cacheRead * f) };
 };
+
+function disk(): DiskUsage {
+  const size = (bytes: number, files: number, agoH: number) => ({ bytes, files, lastModified: now - agoH * H });
+  const projects = [
+    ["C--Users-demo-Projects-web-shop", "C:\\Users\\demo\\Projects\\web-shop", 412e6, 318, 2],
+    ["C--Users-demo-Projects-api-server", "C:\\Users\\demo\\Projects\\api-server", 236e6, 201, 21],
+    ["C--Users-demo-Documents-notes", "C:\\Users\\demo\\Documents\\notes", 88e6, 64, 40],
+    ["D--work-data-pipeline", "D:\\work\\data-pipeline", 51e6, 37, 59],
+    ["D--work-old-prototype", "D--work-old-prototype", 3.2e6, 4, 24 * 40],
+  ].map(([folder, path, bytes, files, agoH]) => ({ folder: folder as string, path: path as string, size: size(Math.round(bytes as number), files as number, agoH as number) }));
+  const transcripts = projects.reduce((s, p) => ({ bytes: s.bytes + p.size.bytes, files: s.files + p.size.files, lastModified: Math.max(s.lastModified, p.size.lastModified) }), size(0, 0, 0));
+  return {
+    transcripts: { ...transcripts, lastModified: now - 2 * H },
+    projects,
+    backups: { total: size(184e6, 2230, 1), full: { bytes: 171e6, count: 6 }, liveRefresh: { bytes: 12.4e6, count: 20 } },
+    pointers: size(3.1e6, 412, 1),
+    app: size(48e6, 9, 1),
+  };
+}
+
+function emptyDisk(): DiskUsage {
+  const zero = { bytes: 0, files: 0, lastModified: 0 };
+  return { transcripts: zero, projects: [], backups: { total: zero, full: { bytes: 0, count: 0 }, liveRefresh: { bytes: 0, count: 0 } }, pointers: zero, app: zero };
+}
 
 function emptySpending(range: SpendingRange): SpendingReport {
   return { ...spending(range), totals: { tokens: zeroTokens(), cost: zeroCost(), messages: 0, chats: 0, unpriced: zeroTokens(), subagentTokens: zeroTokens(), subagentCost: 0 }, previous: null, projects: [], chats: [], models: [], days: [], hours: [] };

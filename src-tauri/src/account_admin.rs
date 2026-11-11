@@ -199,6 +199,8 @@ mod tests {
             id: format!("acc-{uuid}"),
             label: uuid[..4].to_string(),
             custom_label: None,
+            color: None,
+            note: None,
             email: format!("{}@example.com", &uuid[..4]),
             account_uuid: uuid.to_string(),
             org_uuid: format!("org-{}", &uuid[..4]),

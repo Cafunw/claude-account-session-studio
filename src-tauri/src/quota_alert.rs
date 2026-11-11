@@ -8,14 +8,20 @@ use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 const MAX_AGE_HOURS: i64 = 6;
 const REARM_MARGIN: f64 = 10.0;
+/// A suggested account must be at least this many points emptier than the active one.
+const MIN_GAP: f64 = 20.0;
 
 fn parse(ts: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(ts).ok().map(|d| d.with_timezone(&Utc))
+}
+
+fn is_fresh(usage: &UsageMetrics, now: DateTime<Utc>) -> bool {
+    usage.fetched_at.as_deref().and_then(parse).is_some_and(|t| (now - t).num_hours() < MAX_AGE_HOURS)
 }
 
 /// Returns the window key ("5 saatlik"/"haftalık", see `window_label`) and its utilization to announce, updating `notified`.
@@ -27,8 +33,7 @@ pub fn decide(
     threshold: f64,
     now: DateTime<Utc>,
 ) -> Option<(&'static str, f64)> {
-    let fresh = usage.fetched_at.as_deref().and_then(parse).is_some_and(|t| (now - t).num_hours() < MAX_AGE_HOURS);
-    if !fresh {
+    if !is_fresh(usage, now) {
         return None;
     }
     let mut out = None;
@@ -60,8 +65,7 @@ fn has_reset(prev: (f64, Option<DateTime<Utc>>), cur: f64, now: DateTime<Utc>) -
 
 /// Windows of this account that just reset, updating `seen`. The first observation never reports.
 pub fn observe_resets(seen: &mut Seen, uuid: &str, usage: &UsageMetrics, now: DateTime<Utc>) -> Vec<&'static str> {
-    let fresh = usage.fetched_at.as_deref().and_then(parse).is_some_and(|t| (now - t).num_hours() < MAX_AGE_HOURS);
-    if !fresh {
+    if !is_fresh(usage, now) {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -90,12 +94,17 @@ fn load(u: &UsageMetrics) -> f64 {
     p(&u.five_hour).max(p(&u.seven_day))
 }
 
-pub fn message(active: &AccountProfile, window: &str, pct: f64, all: &[AccountProfile]) -> String {
-    let best = all
-        .iter()
-        .filter(|a| a.account_uuid != active.account_uuid && (a.usage.five_hour.is_some() || a.usage.seven_day.is_some()))
-        .min_by(|a, b| load(&a.usage).total_cmp(&load(&b.usage)));
-    let tip = match best {
+/// The emptiest other account with fresh data that is under the threshold and at least `MIN_GAP`
+/// points emptier than the active one; None when nothing is worth switching to.
+pub fn suggest<'a>(active: &AccountProfile, all: &'a [AccountProfile], threshold: f64, now: DateTime<Utc>) -> Option<&'a AccountProfile> {
+    let ceiling = load(&active.usage) - MIN_GAP;
+    all.iter()
+        .filter(|a| a.account_uuid != active.account_uuid && is_fresh(&a.usage, now) && load(&a.usage) < threshold && load(&a.usage) <= ceiling)
+        .min_by(|a, b| load(&a.usage).total_cmp(&load(&b.usage)))
+}
+
+pub fn message(active: &AccountProfile, window: &str, pct: f64, suggestion: Option<&AccountProfile>) -> String {
+    let tip = match suggestion {
         Some(b) => t(
             format!("{} hesabına geçebilirsin (%{:.0} dolu).", display_name(b), load(&b.usage)),
             format!("You can switch to {} ({:.0}% used).", display_name(b), load(&b.usage)),
@@ -153,12 +162,26 @@ pub fn spawn(app: AppHandle) {
             }
             let Some(active) = accounts.iter().find(|a| a.is_active) else { continue };
             if let Some((window, pct)) = decide(&mut notified, &active.account_uuid, &active.usage, threshold, Utc::now()) {
+                let pick = suggest(active, &accounts, threshold, Utc::now());
                 let _ = app
                     .notification()
                     .builder()
                     .title(t("Claude kotası dolmak üzere", "Claude quota almost full"))
-                    .body(message(active, window, pct, &accounts))
+                    .body(message(active, window, pct, pick))
                     .show();
+                // The in-app banner; the app still never switches by itself.
+                if let Some(to) = pick {
+                    let _ = app.emit(
+                        "switch-suggested",
+                        serde_json::json!({
+                            "fromUuid": active.account_uuid,
+                            "toUuid": to.account_uuid,
+                            "window": window_label(window),
+                            "pct": pct,
+                            "toPct": load(&to.usage),
+                        }),
+                    );
+                }
             }
         }
     });
@@ -235,9 +258,47 @@ mod tests {
             a
         };
         let all = [acc("a", "a@x.com", 92.0), acc("b", "b@x.com", 30.0)];
+        let pick = suggest(&all[0], &all, 90.0, Utc::now());
         crate::i18n::set_test_lang(crate::i18n::Lang::Tr);
-        assert_eq!(message(&all[0], "haftalık", 92.0, &all), "a@x.com haftalık limiti %92. b@x.com hesabına geçebilirsin (%30 dolu).");
+        assert_eq!(message(&all[0], "haftalık", 92.0, pick), "a@x.com haftalık limiti %92. b@x.com hesabına geçebilirsin (%30 dolu).");
+        assert_eq!(message(&all[0], "haftalık", 92.0, None), "a@x.com haftalık limiti %92. Uygulamadan başka bir hesaba geçebilirsin.");
         crate::i18n::set_test_lang(crate::i18n::Lang::En);
-        assert_eq!(message(&all[0], "haftalık", 92.0, &all), "a@x.com: weekly limit at 92%. You can switch to b@x.com (30% used).");
+        assert_eq!(message(&all[0], "haftalık", 92.0, pick), "a@x.com: weekly limit at 92%. You can switch to b@x.com (30% used).");
+    }
+
+    #[test]
+    fn suggest_rules() {
+        let now = Utc::now();
+        let acc = |uuid: &str, u: UsageMetrics| {
+            let mut a: AccountProfile = serde_json::from_value(serde_json::json!({
+                "id": "", "label": "", "email": format!("{uuid}@x.com"), "accountUuid": uuid, "orgUuid": "", "planType": "",
+                "rateLimitTier": "", "hasDpapiCredentials": false, "isActive": false, "sessionCount": 0,
+                "healthySessionCount": 0, "lastActivityAt": null, "usage": {"source": ""}, "addedAt": ""
+            }))
+            .unwrap();
+            a.usage = u;
+            a
+        };
+        let active = acc("a", usage(10.0, 92.0, now));
+        let pick = |others: Vec<AccountProfile>| {
+            let mut all = vec![active.clone()];
+            all.extend(others);
+            suggest(&active, &all, 90.0, now).map(|a| a.account_uuid.clone())
+        };
+        // the emptiest of the qualifying ones wins
+        assert_eq!(pick(vec![acc("b", usage(10.0, 60.0, now)), acc("c", usage(40.0, 20.0, now))]), Some("c".into()));
+        // not 20 points emptier than the active one (72 -> 71 is too close)
+        assert_eq!(pick(vec![acc("b", usage(10.0, 73.0, now))]), None);
+        assert_eq!(pick(vec![acc("b", usage(10.0, 72.0, now))]), Some("b".into()));
+        // at or above the threshold is never suggested, even with a big gap to a 100% active account
+        let full = acc("a", usage(10.0, 100.0, now));
+        let all = [full.clone(), acc("b", usage(10.0, 91.0, now))];
+        assert!(suggest(&full, &all, 90.0, now).is_none());
+        // stale or missing data does not count
+        let old = now - chrono::Duration::hours(7);
+        assert_eq!(pick(vec![acc("b", usage(1.0, 1.0, old))]), None);
+        assert_eq!(pick(vec![acc("b", UsageMetrics::default())]), None);
+        // the active account itself is skipped; no others: nothing
+        assert_eq!(pick(vec![]), None);
     }
 }

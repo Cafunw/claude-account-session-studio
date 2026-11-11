@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowDown, ArrowUp, ChevronDown, Coins, Download, FolderOpen, MessagesSquare, Search, X } from "lucide-react";
-import { Amount, SpendingRange, SpendingReport, TokenSums } from "../types";
+import { Amount, AutomationSettings, BudgetSpent, FullDashboardPayload, SpendingRange, SpendingReport, TokenSums } from "../types";
 import { Button, Card, focusRing, formatDateShort, Segmented, StatCard } from "../ui";
 import { locale, t } from "../i18n";
 
@@ -50,7 +50,15 @@ const FAMILY_BG: Record<string, string> = {
 };
 const familyName = (f: string) => (f === "other" ? t("spend.other") : f[0].toUpperCase() + f.slice(1));
 
-export default function SpendingPage({ saveFile }: { saveFile: (save: () => Promise<string>) => void }) {
+export default function SpendingPage({
+  saveFile,
+  automation,
+  onDashboard,
+}: {
+  saveFile: (save: () => Promise<string>) => void;
+  automation: AutomationSettings;
+  onDashboard: (d: FullDashboardPayload) => void;
+}) {
   const [range, setRange] = useState<SpendingRange>("7");
   const [metric, setMetric] = useState<Metric>("tokens");
   const [report, setReport] = useState<Report | null>(null);
@@ -107,6 +115,8 @@ export default function SpendingPage({ saveFile }: { saveFile: (save: () => Prom
         <p className={MUTED}>{t("spend.info")}</p>
       </Card>
 
+      <Budget automation={automation} onDashboard={onDashboard} report={report} />
+
       {loading && progress && progress.total > 0 && (
         <div className="space-y-1.5 px-1">
           <p className="text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{t("spend.progress", { done: progress.done, n: progress.total })}</p>
@@ -159,6 +169,153 @@ export default function SpendingPage({ saveFile }: { saveFile: (save: () => Prom
         </div>
       )}
     </div>
+  );
+}
+
+const BUDGET_MAX = 100_000;
+
+/** Today's and the last 7 days' spending against the alert limits; edited in place. */
+function Budget({ automation, onDashboard, report }: { automation: AutomationSettings; onDashboard: (d: FullDashboardPayload) => void; report: Report | null }) {
+  const limits = [automation.budgetDailyUsd ?? 0, automation.budgetWeeklyUsd ?? 0];
+  const on = limits.some((l) => l > 0);
+  const [spent, setSpent] = useState<BudgetSpent | null>(null);
+  const [draft, setDraft] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // Fetched after each page report (the scan is shared, so this only reads what is new): the "today"
+  // and "7" totals come from the backend whatever range the page shows.
+  useEffect(() => {
+    if (!on || !report) return;
+    let live = true;
+    invoke<BudgetSpent>("get_spending_budget").then((s) => live && setSpent(s)).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [on, report]);
+
+  const close = () => (setDraft(null), setError(null));
+  const save = async () => {
+    const values = draft!.map((v) => (v.trim() === "" ? 0 : Number(v.replace(",", "."))));
+    if (values.some((v) => !Number.isFinite(v) || v < 0 || v > BUDGET_MAX)) return setError(t("spend.budget.invalid"));
+    setSaving(true);
+    try {
+      onDashboard(await invoke<FullDashboardPayload>("set_spending_budget", { daily: values[0], weekly: values[1] }));
+      close();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (draft) {
+    const fields = [t("spend.budget.daily"), t("spend.budget.weekly")];
+    return (
+      <Card className="space-y-2 px-4 py-3">
+        <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{t("spend.budget")}</h2>
+        <form
+          className="flex flex-wrap items-end gap-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void save();
+          }}
+          onKeyDown={(e) => e.key === "Escape" && close()}
+        >
+          {fields.map((label, i) => (
+            <label key={label} className={`flex flex-col gap-1 ${MUTED}`}>
+              {label}
+              <input
+                type="number"
+                inputMode="decimal"
+                min={0}
+                max={BUDGET_MAX}
+                step="any"
+                autoFocus={i === 0}
+                value={draft[i]}
+                onChange={(e) => setDraft(draft.map((v, k) => (k === i ? e.target.value : v)))}
+                aria-invalid={!!error}
+                className="h-8 w-40 rounded-md border border-zinc-300 bg-white px-2 text-sm tabular-nums text-zinc-900 outline-none focus:border-[#D97757] focus:ring-2 focus:ring-[#D97757]/30 dark:border-white/15 dark:bg-[#17181c] dark:text-zinc-100"
+              />
+            </label>
+          ))}
+          <Button type="submit" variant="primary" className="h-8" disabled={saving}>
+            {t("spend.budget.save")}
+          </Button>
+          <Button className="h-8" disabled={saving} onClick={close}>
+            {t("common.cancel")}
+          </Button>
+        </form>
+        {error && (
+          <p role="alert" className="text-xs text-rose-700 dark:text-rose-300">
+            {error}
+          </p>
+        )}
+        <p className={MUTED}>{t("spend.budget.hint")}</p>
+      </Card>
+    );
+  }
+
+  const edit = () => setDraft(limits.map((l) => (l > 0 ? String(l) : "")));
+  if (!on) {
+    return (
+      <Card className="flex flex-wrap items-center gap-2 px-4 py-2.5">
+        <p className={`min-w-0 flex-1 ${MUTED}`}>{t("spend.budget.offLine")}</p>
+        <Button className="h-8" onClick={edit}>
+          {t("spend.budget.set")}
+        </Button>
+      </Card>
+    );
+  }
+
+  const rows = [t("spend.budget.today"), t("spend.budget.week")].map((label, i) => ({ label, limit: limits[i], value: spent ? (i === 0 ? spent.today : spent.week) : null }));
+  return (
+    <Card className="px-4 py-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{t("spend.budget")}</h2>
+        <Button variant="ghost" className="h-7 px-2 text-xs" onClick={edit}>
+          {t("spend.budget.edit")}
+        </Button>
+      </div>
+      <dl className="grid grid-cols-2 gap-4">
+        {rows.map(({ label, limit, value }) => {
+          const share = limit > 0 && value !== null ? (value / limit) * 100 : 0;
+          // Neutral below 80 %, amber from 80 %, red at 100 %; the percentage is always written out too.
+          const fill = share >= 100 ? "bg-rose-500" : share >= 80 ? "bg-amber-400" : "bg-zinc-400 dark:bg-zinc-500";
+          const pctText = t("fmt.pct", { n: Math.floor(share).toLocaleString(locale()) }) + (share >= 100 ? ` · ${t("spend.budget.over")}` : "");
+          const shown = value === null ? "…" : usdFull(value);
+          return (
+            <div key={label} className="min-w-0 space-y-1">
+              <dt className={`flex justify-between gap-2 ${MUTED}`}>
+                <span className="truncate">{label}</span>
+                {limit > 0 && value !== null && <span className={`tabular-nums ${share >= 100 ? "font-medium text-rose-700 dark:text-rose-300" : ""}`}>{pctText}</span>}
+              </dt>
+              <dd className="text-sm font-medium tabular-nums text-zinc-900 dark:text-zinc-100">
+                {limit > 0 ? (
+                  <>
+                    {shown} <span className="font-normal text-zinc-500 dark:text-zinc-400">/ {usdFull(limit)}</span>
+                  </>
+                ) : (
+                  <span className="font-normal text-zinc-500 dark:text-zinc-400">{t("spend.budget.rowOff")}</span>
+                )}
+              </dd>
+              {limit > 0 && (
+                <div
+                  className="h-1 w-full overflow-hidden rounded-full bg-zinc-200/70 dark:bg-white/10"
+                  role="progressbar"
+                  aria-label={t("spend.budget.aria", { label, spent: shown, limit: usdFull(limit), pct: pctText })}
+                  aria-valuenow={Math.round(Math.min(share, 100))}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <div className={`h-full rounded-full transition-[width] duration-300 ${fill}`} style={{ width: `${Math.min(100, share)}%` }} />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </dl>
+    </Card>
   );
 }
 

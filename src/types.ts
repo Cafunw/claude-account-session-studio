@@ -49,6 +49,8 @@ export interface AccountProfile {
   id: string;
   label: string;
   customLabel?: string | null;
+  color?: string | null;
+  note?: string | null;
   email: string;
   accountUuid: string;
   orgUuid: string;
@@ -77,6 +79,9 @@ export interface AutomationSettings {
   transferMode: "ask" | "all";
   /** Background update check (GitHub Releases) and install at startup. */
   autoUpdate: boolean;
+  /** Spending alert limits in USD at API list prices; 0 = off. */
+  budgetDailyUsd: number;
+  budgetWeeklyUsd: number;
   selectedChats: string[];
   selectedGroups: string[];
   selectedFolders: string[];
@@ -138,6 +143,19 @@ export interface BackupManifest {
   files: BackupFileEntry[];
 }
 
+export interface RestorePreviewFile {
+  relativePath: string;
+  status: "missing" | "different" | "identical";
+  title: string;
+  lastActivityAt: number | null;
+  accountUuid: string;
+}
+
+export interface RestorePreview {
+  backupId: string;
+  files: RestorePreviewFile[];
+}
+
 export interface FullDashboardPayload {
   environment: EnvironmentReport;
   automation: AutomationSettings;
@@ -180,6 +198,15 @@ export interface SwitchPlan {
   pending: PendingChat[];
 }
 
+/** Payload of the backend's "switch-suggested" event; `window` is already localized. */
+export interface SwitchSuggested {
+  fromUuid: string;
+  toUuid: string;
+  window: string;
+  pct: number;
+  toPct: number;
+}
+
 export interface UpdateInfo {
   available: boolean;
   version: string | null;
@@ -208,6 +235,12 @@ export interface SearchHit {
   snippet: string;
   matchedRole: "user" | "assistant";
   lastActivityAt: number;
+}
+
+export interface BulkExport {
+  folder: string;
+  exported: number;
+  skipped: { title: string; reason: string }[];
 }
 
 export interface JournalEntry {
@@ -272,3 +305,27 @@ export interface SpendingReport {
   pricesAsOf: string;
   skippedFiles: number;
 }
+
+/** `get_spending_budget`: cost of today and of the last 7 local days (the "today" and "7" report totals). */
+export interface BudgetSpent {
+  today: number;
+  week: number;
+}
+
+export interface DiskSize {
+  bytes: number;
+  files: number;
+  /** Newest file (ms); 0 with no files. */
+  lastModified: number;
+}
+
+export interface DiskUsage {
+  transcripts: DiskSize;
+  /** Largest first; `path` is the project's folder when known, else the transcript folder name. */
+  projects: { folder: string; path: string; size: DiskSize }[];
+  backups: { total: DiskSize; full: { bytes: number; count: number }; liveRefresh: { bytes: number; count: number } };
+  pointers: DiskSize;
+  app: DiskSize;
+}
+
+export type DiskFolderKind = "transcripts" | "backups" | "pointers" | "app";

@@ -13,6 +13,7 @@ pub mod background;
 pub mod chat_text;
 pub mod backup;
 pub mod desktop_switch;
+pub mod disk_usage;
 pub mod dpapi;
 pub mod format_guard;
 pub mod fs_watch;
@@ -610,6 +611,23 @@ fn set_notify_on_reset(enabled: bool, state: State<'_, AppState>) -> Result<Full
     Ok(build_dashboard_state(&state))
 }
 
+/// Sets the spending alert limits in USD (0 = off), then checks them at once in the background.
+#[tauri::command(async)]
+fn set_spending_budget(daily: f64, weekly: f64, app: AppHandle, state: State<'_, AppState>) -> Result<FullDashboardPayload, String> {
+    let ok = |v: f64| v.is_finite() && (0.0..=100_000.0).contains(&v);
+    if !ok(daily) || !ok(weekly) {
+        return Err(i18n::t("Bütçe 0 ile 100000 USD arasında olmalı.", "The budget must be between 0 and 100000 USD.").to_string());
+    }
+    {
+        let mut cfg = state.config.lock().unwrap();
+        cfg.automation.budget_daily_usd = daily;
+        cfg.automation.budget_weekly_usd = weekly;
+        save_studio_config(&state.studio_dir, &cfg)?;
+    }
+    std::thread::spawn(move || spending::check_budget(&app));
+    Ok(build_dashboard_state(&state))
+}
+
 /// Gives an account a user-chosen name; an empty name resets it.
 #[tauri::command(async)]
 fn rename_account(
@@ -632,6 +650,29 @@ fn rename_account(
     let dash = build_dashboard_state(&state);
     tray::refresh(&app, &dash.accounts);
     Ok(dash)
+}
+
+/// Sets an account's colour tag and note. The colour must be a palette id or None; the note is trimmed, capped and may be empty.
+#[tauri::command(async)]
+fn set_account_meta(
+    account_uuid: String,
+    color: Option<String>,
+    note: String,
+    state: State<'_, AppState>,
+) -> Result<FullDashboardPayload, String> {
+    let (color, note) = accounts::clean_meta(color.as_deref(), &note)?;
+    {
+        let mut cfg = state.config.lock().unwrap();
+        let acc = cfg
+            .accounts
+            .iter_mut()
+            .find(|a| a.account_uuid.eq_ignore_ascii_case(&account_uuid))
+            .ok_or_else(|| i18n::t("Hesap bulunamadı.", "Account not found.").to_string())?;
+        acc.color = color;
+        acc.note = note;
+        save_studio_config(&state.studio_dir, &cfg)?;
+    }
+    Ok(build_dashboard_state(&state))
 }
 
 #[tauri::command(async)]
@@ -659,6 +700,7 @@ fn create_manual_backup(
 #[tauri::command(async)]
 fn execute_safe_restore(
     backup_id: String,
+    files: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<RestoreResult, String> {
     let dash = build_dashboard_state(&state);
@@ -670,7 +712,17 @@ fn execute_safe_restore(
         &backup_id,
         Path::new(&active_root.path),
         "live",
+        files.as_deref(),
     )
+}
+
+#[tauri::command(async)]
+fn preview_restore(backup_id: String, state: State<'_, AppState>) -> Result<backup::RestorePreview, String> {
+    let dash = build_dashboard_state(&state);
+    let Some(active_root) = dash.environment.active_data_root else {
+        return Err(i18n::t("Veri klasörü bulunamadı.", "Data folder not found.").to_string());
+    };
+    backup::preview_restore(&state.backup_storage_dir, &backup_id, Path::new(&active_root.path))
 }
 
 /// Copy chats missing in any account (additions only, sidebar config untouched). Returns how many were added.
@@ -867,16 +919,22 @@ pub fn run() {
             get_usage_history,
             spending::get_spending,
             spending::export_spending_csv,
+            spending::get_spending_budget,
+            set_spending_budget,
+            disk_usage::get_disk_usage,
+            disk_usage::reveal_disk_folder,
             refresh_all_usage,
             run_health_check,
             chat_text::search_chats,
             chat_text::export_chat_markdown,
+            chat_text::export_chats_markdown,
             chat_text::reveal_in_explorer,
             one_click_switch_account,
             one_click_start_new_account_login,
             rename_account,
             account_admin::remove_account,
             account_admin::move_account,
+            set_account_meta,
             set_sync_selection,
             get_switch_plan,
             update_preferences,
@@ -889,6 +947,7 @@ pub fn run() {
             set_language,
             create_manual_backup,
             execute_safe_restore,
+            preview_restore,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Claude Account & Session Studio");

@@ -62,6 +62,24 @@ fn limit_notice_still_applies(u: &UsageMetrics, error_at_ms: i64) -> bool {
     pcts.iter().any(|&p| p >= 100.0)
 }
 
+/// Fixed palette; the UI maps each id to its own classes.
+pub const COLOR_IDS: [&str; 8] = ["red", "orange", "amber", "green", "teal", "blue", "violet", "pink"];
+pub const NOTE_MAX: usize = 200;
+
+/// Validates the user's colour/note input: an unknown colour is an error, the note is trimmed and capped, empty means none.
+pub fn clean_meta(color: Option<&str>, note: &str) -> Result<(Option<String>, Option<String>), String> {
+    if let Some(c) = color {
+        if !COLOR_IDS.contains(&c) {
+            return Err(crate::i18n::t("Geçersiz renk.", "Invalid colour.").to_string());
+        }
+    }
+    let note = note.trim();
+    if note.chars().count() > NOTE_MAX {
+        return Err(crate::i18n::t("Not en fazla 200 karakter olabilir.", "The note can be at most 200 characters.").to_string());
+    }
+    Ok((color.map(str::to_string), (!note.is_empty()).then(|| note.to_string())))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountProfile {
@@ -70,6 +88,12 @@ pub struct AccountProfile {
     /// User-chosen name; `label` is auto-filled, so it can't tell the two apart.
     #[serde(default)]
     pub custom_label: Option<String>,
+    /// Palette id (see `COLOR_IDS`) the user tagged the account with.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Free one-line note, at most `NOTE_MAX` characters.
+    #[serde(default)]
+    pub note: Option<String>,
     pub email: String,
     pub account_uuid: String,
     pub org_uuid: String,
@@ -129,6 +153,11 @@ pub struct AutomationSettings {
     /// Checks GitHub Releases in the background and installs updates; off = never contacts GitHub by itself.
     #[serde(default = "default_true")]
     pub auto_update: bool,
+    /// Spending alert limits in USD at API list prices (0 = off): today, and the last 7 local days.
+    #[serde(default)]
+    pub budget_daily_usd: f64,
+    #[serde(default)]
+    pub budget_weekly_usd: f64,
     /// Legacy, replaced by `transfer_mode`; kept so old configs load.
     #[serde(default)]
     pub sync_only_selected: bool,
@@ -180,6 +209,8 @@ impl Default for AutomationSettings {
             confirm_before_desktop_restart: true,
             transfer_mode: default_transfer_mode(),
             auto_update: true,
+            budget_daily_usd: 0.0,
+            budget_weekly_usd: 0.0,
             sync_only_selected: false,
             selected_chats: Vec::new(),
             selected_groups: Vec::new(),
@@ -522,6 +553,8 @@ pub fn discover_accounts_in_root(
                         .unwrap_or_else(|| format!("acc-{}", &account_uuid[..8.min(account_uuid.len())])),
                     label,
                     custom_label: existing.and_then(|e| e.custom_label.clone()),
+                    color: existing.and_then(|e| e.color.clone()),
+                    note: existing.and_then(|e| e.note.clone()),
                     email,
                     account_uuid: account_uuid.clone(),
                     org_uuid,
@@ -764,6 +797,24 @@ mod tests {
         assert_eq!(display_name(&acc), "a@b.com");
         acc.custom_label = Some("İş".into());
         assert_eq!(display_name(&acc), "İş");
+    }
+
+    #[test]
+    fn meta_validation() {
+        crate::i18n::set_test_lang(crate::i18n::Lang::En);
+        assert_eq!(clean_meta(Some("teal"), "  hi  "), Ok((Some("teal".into()), Some("hi".into()))));
+        assert_eq!(clean_meta(None, "   "), Ok((None, None)));
+        assert!(clean_meta(Some("magenta"), "").is_err());
+        assert!(clean_meta(Some(""), "").is_err());
+        assert!(clean_meta(None, &"ö".repeat(200)).is_ok()); // counted in characters, not bytes
+        assert!(clean_meta(None, &"x".repeat(201)).is_err());
+        assert!(clean_meta(None, &format!("{}  ", "x".repeat(200))).is_ok()); // trimmed before the cap
+        // an old config without the fields still loads
+        let acc: AccountProfile = serde_json::from_str(
+            r#"{"id":"","label":"","email":"","accountUuid":"u","orgUuid":"","planType":"","rateLimitTier":"","hasDpapiCredentials":false,"isActive":false,"sessionCount":0,"healthySessionCount":0,"lastActivityAt":null,"usage":{"source":""},"addedAt":""}"#,
+        )
+        .unwrap();
+        assert!(acc.color.is_none() && acc.note.is_none());
     }
 
     #[test]

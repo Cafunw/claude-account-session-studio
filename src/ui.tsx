@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { MoreVertical } from "lucide-react";
 import { AccountProfile, UsageWindow } from "./types";
-import { locale, pct, t } from "./i18n";
+import { Key, locale, pct, t } from "./i18n";
 
 export const focusRing =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97757]/70 focus-visible:ring-offset-1 dark:focus-visible:ring-offset-[#17181c]";
@@ -37,6 +37,14 @@ export function formatDateShort(msOrIso: number | string | null): string {
   return d.toLocaleDateString(locale(), { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
+/** "1,5 GB" style size (binary units, short names as Windows shows them). */
+export function formatBytes(n: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = n > 0 ? Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024))) : 0;
+  const v = n / 1024 ** i;
+  return `${v.toLocaleString(locale(), { maximumFractionDigits: i === 0 || v >= 100 ? 0 : 1 })} ${units[i]}`;
+}
+
 // Desktop-only logins have no readable e-mail; the backend fills in "account-<id>@claude.ai".
 export function accountName(acc: AccountProfile): { name: string; hint: string | null } {
   const desktopOnly = acc.email.startsWith("account-") && acc.email.endsWith("@claude.ai");
@@ -45,6 +53,25 @@ export function accountName(acc: AccountProfile): { name: string; hint: string |
     : { name: acc.email, hint: null };
   // A custom name takes the title; the original identity moves to the small line.
   return acc.customLabel ? { name: acc.customLabel, hint: [base.name, base.hint].filter(Boolean).join(" ") } : base;
+}
+
+// Fixed palette (ids match the backend's COLOR_IDS); each shade stays visible on white and on the dark card.
+export const ACCOUNT_COLORS = ["red", "orange", "amber", "green", "teal", "blue", "violet", "pink"] as const;
+export const colorBg: Record<string, string> = {
+  red: "bg-red-500 dark:bg-red-400",
+  orange: "bg-orange-500 dark:bg-orange-400",
+  amber: "bg-amber-500 dark:bg-amber-400",
+  green: "bg-emerald-500 dark:bg-emerald-400",
+  teal: "bg-teal-500 dark:bg-teal-400",
+  blue: "bg-blue-500 dark:bg-blue-400",
+  violet: "bg-violet-500 dark:bg-violet-400",
+  pink: "bg-pink-500 dark:bg-pink-400",
+};
+
+/** The account's colour tag; renders nothing for no colour or an id from a newer palette. */
+export function ColorDot({ color, className = "" }: { color?: string | null; className?: string }) {
+  if (!color || !colorBg[color]) return null;
+  return <span role="img" aria-label={t(`acc.color.${color}` as Key)} className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${colorBg[color]} ${className}`} />;
 }
 
 export function Card({ className = "", ...props }: React.HTMLAttributes<HTMLDivElement>) {
