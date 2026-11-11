@@ -859,6 +859,7 @@ pub fn run() {
             quota_alert::spawn(app.handle().clone());
             format_guard::spawn_alert(app.handle().clone());
             updater::spawn(app.handle().clone());
+            spending::spawn_warmup(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

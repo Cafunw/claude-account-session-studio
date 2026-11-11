@@ -226,7 +226,19 @@ export function installDevMock() {
           await sleep(150);
           return history(args.accountUuid, args.days);
         case "get_spending":
-          await sleep(400);
+          // First open of each range acts like a cold scan with progress events; later ones are warm.
+          // A second request joins the running scan, as the backend does.
+          if (!scans.has(args.days)) {
+            const total = args.days > 7 ? 2686 : 1406;
+            const slow = location.search.includes("yavas");
+            scans.set(args.days, (async () => {
+              for (let i = 0; i <= 20; i++) {
+                await emit("spending-progress", { done: Math.round((total * i) / 20), total });
+                await sleep(slow ? 1500 : 120);
+              }
+            })());
+          } else await sleep(400);
+          await scans.get(args.days);
           return location.search.includes("bos") ? { ...spending(args.days), totals: { tokens: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: 0 }, messages: 0, chats: 0 }, projects: [], chats: [], models: [] } : spending(args.days);
         case "refresh_all_usage":
           await sleep(700);
@@ -347,6 +359,8 @@ export function installDevMock() {
   // The background check's banner; the real app sends it at most once per version.
   setTimeout(() => emit("update-available", { version: "1.1.0" }), 1200);
 }
+
+const scans = new Map<number, Promise<void>>();
 
 // Made-up token counts; the 30-day view is a scaled-up 7-day one plus one older project.
 function spending(days: number): SpendingReport {

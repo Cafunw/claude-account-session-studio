@@ -238,13 +238,18 @@ fn inside_dir(path: &Path, dir: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// The chats the app lists: one per CLI session id, newest first, with a transcript id.
-pub(crate) fn listed_chats(state: &AppState) -> (PathBuf, Vec<SessionRecord>) {
-    let projects = std::env::var_os("USERPROFILE")
+/// `~/.claude/projects`.
+pub(crate) fn cli_projects_dir() -> PathBuf {
+    std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("C:\\Users\\Default"))
         .join(".claude")
-        .join("projects");
+        .join("projects")
+}
+
+/// The chats the app lists: one per CLI session id, newest first, with a transcript id.
+pub(crate) fn listed_chats(state: &AppState) -> (PathBuf, Vec<SessionRecord>) {
+    let projects = cli_projects_dir();
     let data_root = crate::paths::discover_real_roots()
         .first()
         .map(|r| PathBuf::from(&r.path))

@@ -168,6 +168,7 @@ const tr = {
   "spend.footnote": "Token sayıları Claude Code kayıtlarından hesaplanır; plan kotasının yüzdesi değildir ve hesaplar arasında paylaşılan sohbetler ayrılamaz.",
   "spend.skipped": " {n} çok büyük ya da okunamayan kayıt dosyası atlandı.",
   "spend.other": "Diğer",
+  "spend.progress": "Kayıtlar okunuyor: {done} / {n} dosya",
   "spend.models": "Modeller",
   "spend.modelsAria": "Model payları: {parts}",
 
@@ -429,6 +430,7 @@ const en: Record<Key, string | Plural> = {
   "spend.footnote": "Token counts come from Claude Code's logs; they are not a share of the plan quota, and chats shared between accounts can't be told apart.",
   "spend.skipped": { one: " Skipped {n} log file that was too large or unreadable.", other: " Skipped {n} log files that were too large or unreadable." },
   "spend.other": "Other",
+  "spend.progress": { one: "Reading logs: {done} / {n} file", other: "Reading logs: {done} / {n} files" },
   "spend.models": "Models",
   "spend.modelsAria": "Model shares: {parts}",
 

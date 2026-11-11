@@ -512,6 +512,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "hex",
+ "memchr",
  "notify",
  "serde",
  "serde_json",

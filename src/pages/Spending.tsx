@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Coins, FolderOpen, MessagesSquare } from "lucide-react";
 import { SpendingReport } from "../types";
 import { Card, formatDateShort, Segmented, StatCard } from "../ui";
@@ -23,14 +24,22 @@ export default function SpendingPage() {
   const [report, setReport] = useState<SpendingReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Files read so far by the scan behind the pending request (or the startup warm-up it waits for).
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+
+  useEffect(() => {
+    const off = listen<{ done: number; total: number }>("spending-progress", (e) => setProgress(e.payload));
+    return () => void off.then((f) => f());
+  }, []);
 
   useEffect(() => {
     let live = true;
     setLoading(true);
+    setProgress(null);
     invoke<SpendingReport>("get_spending", { days })
       .then((r) => live && (setReport(r), setError(null)))
       .catch((e) => live && setError(String(e)))
-      .finally(() => live && setLoading(false));
+      .finally(() => live && (setLoading(false), setProgress(null)));
     return () => {
       live = false;
     };
@@ -51,6 +60,24 @@ export default function SpendingPage() {
         />
       </Card>
 
+      {loading && progress && progress.total > 0 && (
+        <div className="space-y-1.5 px-1">
+          <p className="text-xs tabular-nums text-zinc-500 dark:text-zinc-400">
+            {t("spend.progress", { done: progress.done, n: progress.total })}
+          </p>
+          <div
+            className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200/70 dark:bg-white/10"
+            role="progressbar"
+            aria-label={t("spend.loading")}
+            aria-valuenow={progress.done}
+            aria-valuemin={0}
+            aria-valuemax={progress.total}
+          >
+            <div className={`h-full rounded-full transition-[width] duration-200 ${BAR}`} style={{ width: `${(progress.done / progress.total) * 100}%` }} />
+          </div>
+        </div>
+      )}
+
       {error && (
         <p role="alert" className="text-sm text-rose-700 dark:text-rose-300">
           {error}
@@ -67,7 +94,7 @@ export default function SpendingPage() {
           <div className="h-64 animate-pulse rounded-xl bg-zinc-200/60 dark:bg-white/[0.06]" />
         </div>
       ) : report.totals.messages === 0 ? (
-        <Card className="flex flex-col items-center justify-center px-4 py-10 text-center">
+        <Card className={`flex flex-col items-center justify-center px-4 py-10 text-center transition-opacity ${loading ? "opacity-60" : ""}`}>
           <Coins className="mb-2 h-6 w-6 text-zinc-400" aria-hidden />
           <p className="text-sm text-zinc-600 dark:text-zinc-300">{t("spend.empty", { days })}</p>
           <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{t("spend.emptyHint")}</p>
