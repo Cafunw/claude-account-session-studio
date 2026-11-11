@@ -1,6 +1,6 @@
 [package]
 name = "claude-account-session-manager"
-version = "1.0.0"
+version = "1.1.0"
 description = "Claude Code Multi-Account & Safe Session Synchronization Studio for Windows 11"
 authors = ["Claude Account & Session Studio contributors"]
 edition = "2021"
