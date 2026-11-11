@@ -43,6 +43,9 @@ pub struct TokenSums {
     pub cache_write: u64,
     pub cache_read: u64,
     pub total: u64,
+    /// input + output + cache write: what the turns processed, without the conversation re-read
+    /// from cache every turn. Rankings and shares use this.
+    pub work: u64,
 }
 
 impl TokenSums {
@@ -52,6 +55,7 @@ impl TokenSums {
         self.cache_write += o.cache_write;
         self.cache_read += o.cache_read;
         self.total += o.total;
+        self.work += o.work;
     }
 }
 
@@ -87,6 +91,7 @@ pub struct ChatSpend {
 pub struct ModelSpend {
     pub model: String,
     pub total: u64,
+    pub work: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -508,7 +513,8 @@ fn save(store: &Store, studio_dir: &Path) -> Result<(), String> {
 fn share(t: [u64; 4], keep: u64, of: u64) -> TokenSums {
     let f = |x: u64| (x as u128 * keep as u128 / of as u128) as u64;
     let (input, output, cache_write, cache_read) = (f(t[0]), f(t[1]), f(t[2]), f(t[3]));
-    TokenSums { input, output, cache_write, cache_read, total: input + output + cache_write + cache_read }
+    let work = input + output + cache_write;
+    TokenSums { input, output, cache_write, cache_read, total: work + cache_read, work }
 }
 
 #[derive(Default)]
@@ -532,7 +538,7 @@ fn report(
     let (first, last) = (start.div_euclid(SLOT_MS), now.div_euclid(SLOT_MS));
     let mut report = SpendingReport { days, ..Default::default() };
     let mut seen = HashSet::new();
-    let (mut projects, mut chats, mut models) = (HashMap::<&str, Acc>::new(), HashMap::<&str, Acc>::new(), HashMap::<&str, u64>::new());
+    let (mut projects, mut chats, mut models) = (HashMap::<&str, Acc>::new(), HashMap::<&str, Acc>::new(), HashMap::<&str, (u64, u64)>::new());
 
     for f in scan.files.iter().filter(|f| f.mtime >= start) {
         if f.size > max_bytes || scan.failed.contains(&f.path) {
@@ -556,7 +562,8 @@ fn report(
             };
             report.totals.tokens.add(&t);
             report.totals.messages += n;
-            *models.entry(&s.m).or_default() += t.total;
+            let m = models.entry(&s.m).or_default();
+            (m.0, m.1) = (m.0 + t.total, m.1 + t.work);
             let p = projects.entry(cwd).or_default();
             p.tokens.add(&t);
             p.last = p.last.max(s.l);
@@ -575,7 +582,7 @@ fn report(
         .into_iter()
         .map(|(cwd, a)| ProjectSpend { cwd: cwd.to_string(), tokens: a.tokens, chats: a.chats.len() as u64, last_activity_at: a.last })
         .collect();
-    report.projects.sort_by(|a, b| b.tokens.total.cmp(&a.tokens.total).then_with(|| a.cwd.cmp(&b.cwd)));
+    report.projects.sort_by(|a, b| b.tokens.work.cmp(&a.tokens.work).then_with(|| a.cwd.cmp(&b.cwd)));
     report.projects.truncate(TOP);
     report.chats = chats
         .into_iter()
@@ -587,10 +594,10 @@ fn report(
             ChatSpend { cli_session_id: id.to_string(), title, cwd, tokens: a.tokens, last_activity_at: a.last }
         })
         .collect();
-    report.chats.sort_by(|a, b| b.tokens.total.cmp(&a.tokens.total).then_with(|| a.cli_session_id.cmp(&b.cli_session_id)));
+    report.chats.sort_by(|a, b| b.tokens.work.cmp(&a.tokens.work).then_with(|| a.cli_session_id.cmp(&b.cli_session_id)));
     report.chats.truncate(TOP);
-    report.models = models.into_iter().map(|(m, total)| ModelSpend { model: m.to_string(), total }).collect();
-    report.models.sort_by(|a, b| b.total.cmp(&a.total).then_with(|| a.model.cmp(&b.model)));
+    report.models = models.into_iter().map(|(m, (total, work))| ModelSpend { model: m.to_string(), total, work }).collect();
+    report.models.sort_by(|a, b| b.work.cmp(&a.work).then_with(|| a.model.cmp(&b.model)));
     report
 }
 
@@ -748,22 +755,36 @@ mod tests {
         let known = HashMap::from([("c1".to_string(), ("Plan".to_string(), Some("C:\\a".to_string())))]);
         crate::i18n::set_test_lang(crate::i18n::Lang::Tr);
         let r = run(tmp.path(), &known, 7, MAX_FILE_BYTES);
-        assert_eq!(r.totals.tokens, TokenSums { input: 516, output: 26, cache_write: 31, cache_read: 48, total: 621 });
+        assert_eq!(r.totals.tokens, TokenSums { input: 516, output: 26, cache_write: 31, cache_read: 48, total: 621, work: 573 });
         assert_eq!((r.totals.messages, r.totals.chats, r.skipped_files), (5, 3, 0));
 
-        assert_eq!(r.projects.iter().map(|p| (p.cwd.as_str(), p.tokens.total, p.chats)).collect::<Vec<_>>(), [("C:\\b", 500, 1), ("C:\\a", 121, 2)]);
+        assert_eq!(r.projects.iter().map(|p| (p.cwd.as_str(), p.tokens.work, p.tokens.total, p.chats)).collect::<Vec<_>>(), [("C:\\b", 500, 500, 1), ("C:\\a", 73, 121, 2)]);
         assert_eq!(r.projects[1].last_activity_at, now() - DAY_MS / 5);
 
-        let chats: Vec<_> = r.chats.iter().map(|c| (c.cli_session_id.as_str(), c.title.as_str(), c.tokens.total)).collect();
-        assert_eq!(chats, [("c3", UNTITLED, 500), ("c1", "Plan", 104), ("c2", UNTITLED, 17)]);
+        let chats: Vec<_> = r.chats.iter().map(|c| (c.cli_session_id.as_str(), c.title.as_str(), c.tokens.work, c.tokens.total)).collect();
+        assert_eq!(chats, [("c3", UNTITLED, 500, 500), ("c1", "Plan", 63, 104), ("c2", UNTITLED, 10, 17)]);
         assert_eq!(r.chats[0].cwd, "C:\\b");
 
-        let models: Vec<_> = r.models.iter().map(|m| (m.model.as_str(), m.total)).collect();
-        assert_eq!(models, [("sonnet", 504), ("opus", 110), ("haiku", 7)]);
+        let models: Vec<_> = r.models.iter().map(|m| (m.model.as_str(), m.work, m.total)).collect();
+        assert_eq!(models, [("sonnet", 503, 504), ("opus", 70, 110), ("haiku", 0, 7)]);
 
         // The 30-day window picks up the 10-day-old line too.
         assert_eq!(run(tmp.path(), &known, 30, MAX_FILE_BYTES).totals.tokens.total, 1621);
         assert_eq!(exact_total(tmp.path(), 7), 621);
+    }
+
+    #[test]
+    fn rankings_use_work_tokens_not_cache_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A long chat: tiny turns re-reading a big conversation from cache.
+        write(tmp.path(), "p1/long.jsonl", &[asst("l1", 1.0, "C:\\long", "opus", 1, 10, 0, 90_000), asst("l2", 1.0, "C:\\long", "opus", 1, 10, 0, 95_000)]);
+        // A short chat that did real work.
+        write(tmp.path(), "p2/busy.jsonl", &[asst("b1", 1.0, "C:\\busy", "sonnet", 200, 3_000, 5_000, 1_000)]);
+        let r = run(tmp.path(), &HashMap::new(), 7, MAX_FILE_BYTES);
+        assert_eq!((r.totals.tokens.work, r.totals.tokens.cache_read, r.totals.tokens.total), (8_222, 186_000, 194_222));
+        assert_eq!(r.projects.iter().map(|p| p.cwd.as_str()).collect::<Vec<_>>(), ["C:\\busy", "C:\\long"]);
+        assert_eq!(r.chats.iter().map(|c| (c.cli_session_id.as_str(), c.tokens.work)).collect::<Vec<_>>(), [("busy", 8_200), ("long", 22)]);
+        assert_eq!(r.models.iter().map(|m| (m.model.as_str(), m.work, m.total)).collect::<Vec<_>>(), [("sonnet", 8_200, 9_200), ("opus", 22, 185_022)]);
     }
 
     #[test]

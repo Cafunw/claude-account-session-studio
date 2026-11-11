@@ -1,3 +1,5 @@
+<p align="center"><img src="src-tauri/icons/logo.svg" width="96" alt="" /></p>
+
 # Claude Account & Session Studio
 
 Claude Desktop'ta birden fazla Claude hesabı kullananlar için Windows uygulaması. Hesaplar arasında tek tıkla geçer, Code sekmesindeki sohbetleri her hesapta görünür tutar ve kotaları tek ekranda gösterir.

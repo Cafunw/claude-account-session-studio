@@ -132,6 +132,7 @@ export function StatCard({
   icon: Icon,
   tone,
   small,
+  sub,
   children,
 }: {
   label: string;
@@ -139,6 +140,8 @@ export function StatCard({
   icon: React.ComponentType<{ className?: string }>;
   tone: keyof typeof statTones;
   small?: boolean;
+  /** A small muted line under the value. */
+  sub?: React.ReactNode;
   children?: React.ReactNode;
 }) {
   return (
@@ -149,6 +152,7 @@ export function StatCard({
           <p className={`font-semibold tabular-nums text-zinc-900 dark:text-zinc-100 ${small ? "truncate text-base" : "shrink-0 text-2xl"}`}>{value}</p>
           {children}
         </div>
+        {sub && <p className="mt-0.5 truncate text-xs text-zinc-500 dark:text-zinc-400">{sub}</p>}
       </div>
       <Icon className="h-5 w-5 shrink-0" aria-hidden />
     </div>

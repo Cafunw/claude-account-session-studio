@@ -18,6 +18,7 @@ const BAR = "bg-[#2a78d6] dark:bg-[#3987e5]";
 // Model shares: slots 1-4 in fixed order, the rest folded into a gray "other" slice.
 const MODEL_COLORS = ["bg-[#2a78d6] dark:bg-[#3987e5]", "bg-[#eb6834] dark:bg-[#d95926]", "bg-[#1baf7a] dark:bg-[#199e70]", "bg-[#eda100] dark:bg-[#c98500]"];
 const OTHER = "bg-zinc-400 dark:bg-zinc-500";
+const MUTED = "text-xs text-zinc-500 dark:text-zinc-400";
 
 export default function SpendingPage() {
   const [days, setDays] = useState(7);
@@ -45,7 +46,9 @@ export default function SpendingPage() {
     };
   }, [days]);
 
-  const total = report?.totals.tokens.total ?? 0;
+  // Shares use work tokens: cache reads (the conversation re-read every turn) would make them track chat length.
+  const total = report?.totals.tokens.work ?? 0;
+  const sums = report?.totals.tokens;
   const top = report?.projects[0];
 
   return (
@@ -102,30 +105,61 @@ export default function SpendingPage() {
       ) : (
         <div className={`space-y-4 transition-opacity ${loading ? "opacity-60" : ""}`} aria-busy={loading}>
           <div className="grid grid-cols-3 gap-3">
-            <StatCard label={t("spend.total")} value={<span title={full.format(total)}>{fmt(total)}</span>} icon={Coins} tone="sky" />
+            <StatCard
+              label={t("spend.work")}
+              value={<span title={full.format(total)}>{fmt(total)}</span>}
+              icon={Coins}
+              tone="sky"
+              sub={<span title={t("spend.cacheReads", { n: full.format(report.totals.tokens.cacheRead) })}>+ {t("spend.cacheReads", { n: fmt(report.totals.tokens.cacheRead) })}</span>}
+            />
             <StatCard label={t("spend.topProject")} value={<span title={top?.cwd}>{top ? folderName(top.cwd) : "—"}</span>} icon={FolderOpen} tone="amber" small />
             <StatCard label={t("spend.chats")} value={full.format(report.totals.chats)} icon={MessagesSquare} tone="green" />
           </div>
+
+          {sums && (
+            <Card className="px-4 py-3">
+              <h2 className="sr-only">{t("spend.breakdown")}</h2>
+              <dl className="grid grid-cols-4 gap-4">
+                {(
+                  [
+                    ["spend.input", sums.input],
+                    ["spend.output", sums.output],
+                    ["spend.cacheWrite", sums.cacheWrite],
+                    ["spend.cacheRead", sums.cacheRead],
+                  ] as const
+                ).map(([key, n]) => (
+                  <div key={key} className="min-w-0">
+                    <dt className={`truncate ${MUTED}`}>{t(key)}</dt>
+                    <dd className={`mt-0.5 text-sm font-medium tabular-nums ${key === "spend.cacheRead" ? "text-zinc-500 dark:text-zinc-400" : "text-zinc-900 dark:text-zinc-100"}`} title={full.format(n)}>
+                      {fmt(n)}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </Card>
+          )}
 
           <Card className="px-4 py-4">
             <h2 className="mb-3 text-sm font-medium text-zinc-900 dark:text-zinc-100">{t("spend.projects")}</h2>
             <ul className="space-y-2.5">
               {report.projects.map((p) => {
-                const share = total > 0 ? p.tokens.total / total : 0;
+                const share = total > 0 ? p.tokens.work / total : 0;
                 const chats = t("count.chats", { n: p.chats });
-                const tip = t("spend.projectTip", { cwd: p.cwd, tokens: full.format(p.tokens.total), chats, last: formatDateShort(p.lastActivityAt) });
+                const cache = full.format(p.tokens.cacheRead);
+                const tip = t("spend.projectTip", { cwd: p.cwd, tokens: full.format(p.tokens.work), cache, chats, last: formatDateShort(p.lastActivityAt) });
                 return (
                   <li key={p.cwd} title={tip} className="grid grid-cols-[minmax(0,11rem)_1fr_auto] items-center gap-3 text-sm">
                     <span className="truncate text-zinc-700 dark:text-zinc-300">{folderName(p.cwd)}</span>
                     <div
                       className="h-3"
                       role="img"
-                      aria-label={t("spend.projectAria", { name: folderName(p.cwd), cwd: p.cwd, tokens: full.format(p.tokens.total), pct: pct(p.tokens.total, total), chats })}
+                      aria-label={t("spend.projectAria", { name: folderName(p.cwd), cwd: p.cwd, tokens: full.format(p.tokens.work), pct: pct(p.tokens.work, total), cache, chats })}
                     >
                       <div className={`h-full rounded-r ${BAR}`} style={{ width: `${Math.max(0.5, share * 100)}%` }} />
                     </div>
-                    <span className="w-28 text-right tabular-nums text-zinc-900 dark:text-zinc-100">
-                      {fmt(p.tokens.total)} <span className="text-xs text-zinc-500 dark:text-zinc-400">{pct(p.tokens.total, total)}</span>
+                    <span className="w-44 text-right tabular-nums text-zinc-900 dark:text-zinc-100">
+                      {fmt(p.tokens.work)} <span className={MUTED}>{pct(p.tokens.work, total)}</span>{" "}
+                      <span className={MUTED}>+{fmt(p.tokens.cacheRead)}</span>
                     </span>
                   </li>
                 );
@@ -140,8 +174,9 @@ export default function SpendingPage() {
                 <thead>
                   <tr className="border-b border-zinc-100 text-left text-xs text-zinc-500 dark:border-white/[0.06] dark:text-zinc-400">
                     <th scope="col" className="px-4 py-2 font-medium">{t("spend.colChat")}</th>
-                    <th scope="col" className="w-36 px-2 py-2 font-medium">{t("spend.colFolder")}</th>
-                    <th scope="col" className="w-24 px-4 py-2 text-right font-medium">{t("spend.colTokens")}</th>
+                    <th scope="col" className="w-28 px-2 py-2 font-medium">{t("spend.colFolder")}</th>
+                    <th scope="col" className="w-20 px-2 py-2 text-right font-medium">{t("spend.colTokens")}</th>
+                    <th scope="col" className="w-24 px-4 py-2 text-right font-medium">{t("spend.colCache")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -153,8 +188,11 @@ export default function SpendingPage() {
                       <td className="truncate px-2 py-2 text-zinc-500 dark:text-zinc-400" title={c.cwd}>
                         {c.cwd ? folderName(c.cwd) : "—"}
                       </td>
-                      <td className="px-4 py-2 text-right tabular-nums text-zinc-900 dark:text-zinc-100" title={t("spend.tokens", { n: full.format(c.tokens.total) })}>
-                        {fmt(c.tokens.total)}
+                      <td className="px-2 py-2 text-right tabular-nums text-zinc-900 dark:text-zinc-100" title={t("spend.tokens", { n: full.format(c.tokens.work) })}>
+                        {fmt(c.tokens.work)}
+                      </td>
+                      <td className={`px-4 py-2 text-right tabular-nums ${MUTED}`} title={t("spend.cacheReads", { n: full.format(c.tokens.cacheRead) })}>
+                        {fmt(c.tokens.cacheRead)}
                       </td>
                     </tr>
                   ))}
@@ -177,8 +215,9 @@ export default function SpendingPage() {
 
 function Models({ models, total }: { models: SpendingReport["models"]; total: number }) {
   const shown = models.length > 4 ? models.slice(0, 3) : models;
-  const rest = models.slice(shown.length).reduce((s, m) => s + m.total, 0);
-  const parts = [...shown.map((m, i) => ({ name: m.model, total: m.total, cls: MODEL_COLORS[i] })), ...(rest > 0 ? [{ name: t("spend.other"), total: rest, cls: OTHER }] : [])];
+  // Work tokens, like the rest of the page.
+  const rest = models.slice(shown.length).reduce((s, m) => s + m.work, 0);
+  const parts = [...shown.map((m, i) => ({ name: m.model, total: m.work, cls: MODEL_COLORS[i] })), ...(rest > 0 ? [{ name: t("spend.other"), total: rest, cls: OTHER }] : [])];
   return (
     <Card className="px-4 py-4">
       <h2 className="mb-3 text-sm font-medium text-zinc-900 dark:text-zinc-100">{t("spend.models")}</h2>

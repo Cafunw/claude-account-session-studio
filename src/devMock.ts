@@ -239,7 +239,7 @@ export function installDevMock() {
             })());
           } else await sleep(400);
           await scans.get(args.days);
-          return location.search.includes("bos") ? { ...spending(args.days), totals: { tokens: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: 0 }, messages: 0, chats: 0 }, projects: [], chats: [], models: [] } : spending(args.days);
+          return location.search.includes("bos") ? { ...spending(args.days), totals: { tokens: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: 0, work: 0 }, messages: 0, chats: 0 }, projects: [], chats: [], models: [] } : spending(args.days);
         case "refresh_all_usage":
           await sleep(700);
           return {
@@ -362,40 +362,41 @@ export function installDevMock() {
 
 const scans = new Map<number, Promise<void>>();
 
-// Made-up token counts; the 30-day view is a scaled-up 7-day one plus one older project.
+// Made-up token counts in real proportions: cache reads ~30x the processed (work) tokens, which are
+// ~0.5% input, ~16% output, ~84% cache write. A long chat re-reads more, so ratios differ per row.
+// The 30-day view is a scaled-up 7-day one plus one older project.
 function spending(days: number): SpendingReport {
   const k = days > 7 ? 3.4 : 1;
-  const t = (total: number): TokenSums => {
-    const v = Math.round(total * k);
-    return { input: Math.round(v * 0.04), output: Math.round(v * 0.06), cacheWrite: Math.round(v * 0.15), cacheRead: v - Math.round(v * 0.04) - Math.round(v * 0.06) - Math.round(v * 0.15), total: v };
+  const t = (work: number, reads: number): TokenSums => {
+    const w = Math.round(work * k);
+    const input = Math.round(w * 0.005), output = Math.round(w * 0.157), cacheWrite = w - input - output;
+    const cacheRead = Math.round(w * reads);
+    return { input, output, cacheWrite, cacheRead, total: w + cacheRead, work: w };
   };
   const projects = [
-    { cwd: "C:\\Users\\demo\\Projects\\web-shop", tokens: t(48_200_000), chats: 9, lastActivityAt: now - 2 * H },
-    { cwd: "C:\\Users\\demo\\Projects\\api-server", tokens: t(21_700_000), chats: 5, lastActivityAt: now - 20 * H },
-    { cwd: "C:\\Users\\demo\\Documents\\notes", tokens: t(6_400_000), chats: 3, lastActivityAt: now - 50 * H },
-    { cwd: "D:\\work\\data-pipeline", tokens: t(2_150_000), chats: 2, lastActivityAt: now - 90 * H },
-    ...(days > 7 ? [{ cwd: "D:\\work\\old-prototype", tokens: t(900_000), chats: 1, lastActivityAt: now - 400 * H }] : []),
+    { cwd: "C:\\Users\\demo\\Projects\\web-shop", tokens: t(98_400_000, 32), chats: 9, lastActivityAt: now - 2 * H },
+    { cwd: "C:\\Users\\demo\\Projects\\api-server", tokens: t(61_200_000, 22), chats: 5, lastActivityAt: now - 20 * H },
+    { cwd: "C:\\Users\\demo\\Documents\\notes", tokens: t(33_700_000, 40), chats: 3, lastActivityAt: now - 50 * H },
+    { cwd: "D:\\work\\data-pipeline", tokens: t(20_000_000, 25), chats: 2, lastActivityAt: now - 90 * H },
+    ...(days > 7 ? [{ cwd: "D:\\work\\old-prototype", tokens: t(4_100_000, 18), chats: 1, lastActivityAt: now - 400 * H }] : []),
   ];
   const chats = [
-    { cliSessionId: "cli-mock-1", title: "Ödeme sayfası yeniden tasarım", cwd: projects[0].cwd, tokens: t(19_800_000), lastActivityAt: now - 2 * H },
-    { cliSessionId: "cli-mock-2", title: "Sipariş API'si testleri", cwd: projects[1].cwd, tokens: t(12_100_000), lastActivityAt: now - 20 * H },
-    { cliSessionId: "cli-mock-3", title: "Sepet hatası", cwd: projects[0].cwd, tokens: t(9_400_000), lastActivityAt: now - 7 * H },
-    { cliSessionId: "cli-unknown", title: L("Adsız sohbet", "Untitled chat"), cwd: projects[0].cwd, tokens: t(7_700_000), lastActivityAt: now - 30 * H },
-    { cliSessionId: "cli-mock-4", title: "Toplantı notlarını düzenle", cwd: projects[2].cwd, tokens: t(4_300_000), lastActivityAt: now - 50 * H },
-    { cliSessionId: "cli-mock-5", title: "CSV içe aktarma", cwd: projects[3].cwd, tokens: t(2_150_000), lastActivityAt: now - 90 * H },
+    { cliSessionId: "cli-mock-1", title: "Ödeme sayfası yeniden tasarım", cwd: projects[0].cwd, tokens: t(41_300_000, 38), lastActivityAt: now - 2 * H },
+    { cliSessionId: "cli-mock-2", title: "Sipariş API'si testleri", cwd: projects[1].cwd, tokens: t(33_900_000, 21), lastActivityAt: now - 20 * H },
+    { cliSessionId: "cli-mock-3", title: "Sepet hatası", cwd: projects[0].cwd, tokens: t(27_600_000, 19), lastActivityAt: now - 7 * H },
+    { cliSessionId: "cli-unknown", title: L("Adsız sohbet", "Untitled chat"), cwd: projects[0].cwd, tokens: t(18_100_000, 44), lastActivityAt: now - 30 * H },
+    { cliSessionId: "cli-mock-4", title: "Toplantı notlarını düzenle", cwd: projects[2].cwd, tokens: t(15_200_000, 40), lastActivityAt: now - 50 * H },
+    { cliSessionId: "cli-mock-5", title: "CSV içe aktarma", cwd: projects[3].cwd, tokens: t(9_800_000, 25), lastActivityAt: now - 90 * H },
   ];
-  const total = projects.reduce((s, p) => s + p.tokens.total, 0);
   const sum = (f: keyof TokenSums) => projects.reduce((s, p) => s + p.tokens[f], 0);
+  const [total, work] = [sum("total"), sum("work")];
+  const model = (name: string, share: number, reads: number) => ({ model: name, work: Math.round(work * share), total: Math.round(work * share * (1 + reads)) });
   return {
     days,
-    totals: { tokens: { input: sum("input"), output: sum("output"), cacheWrite: sum("cacheWrite"), cacheRead: sum("cacheRead"), total }, messages: Math.round(1840 * k), chats: days > 7 ? 20 : 19 },
+    totals: { tokens: { input: sum("input"), output: sum("output"), cacheWrite: sum("cacheWrite"), cacheRead: sum("cacheRead"), total, work }, messages: Math.round(1840 * k), chats: days > 7 ? 20 : 19 },
     projects,
     chats,
-    models: [
-      { model: "claude-opus-4", total: Math.round(total * 0.62) },
-      { model: "claude-sonnet-4", total: Math.round(total * 0.31) },
-      { model: "claude-haiku-4", total: total - Math.round(total * 0.62) - Math.round(total * 0.31) },
-    ],
+    models: [model("claude-opus-4", 0.62, 31), model("claude-sonnet-4", 0.31, 27), model("claude-haiku-4", 0.07, 12)],
     skippedFiles: 0,
   };
 }

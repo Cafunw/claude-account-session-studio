@@ -224,6 +224,8 @@ export interface TokenSums {
   cacheWrite: number;
   cacheRead: number;
   total: number;
+  /** input + output + cacheWrite: rankings and shares use this, not `total`. */
+  work: number;
 }
 
 export interface SpendingReport {
@@ -231,6 +233,6 @@ export interface SpendingReport {
   totals: { tokens: TokenSums; messages: number; chats: number };
   projects: { cwd: string; tokens: TokenSums; chats: number; lastActivityAt: number }[];
   chats: { cliSessionId: string; title: string; cwd: string; tokens: TokenSums; lastActivityAt: number }[];
-  models: { model: string; total: number }[];
+  models: { model: string; total: number; work: number }[];
   skippedFiles: number;
 }

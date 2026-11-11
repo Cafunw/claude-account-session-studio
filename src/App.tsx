@@ -13,11 +13,11 @@ import {
   ScrollText,
   Settings,
   ShieldAlert,
-  UserRoundCog,
   Users,
 } from "lucide-react";
 import { AccountProfile, AutomationSettings, FullDashboardPayload, HealthReport, PendingChat, SwitchPlan } from "./types";
 import { accountName, formatAgo, focusRing } from "./ui";
+import { Logo } from "./Logo";
 import AccountsPage from "./pages/Accounts";
 import ChatsPage, { Selection } from "./pages/Chats";
 import BackupsPage from "./pages/Backups";
@@ -302,10 +302,7 @@ export default function App() {
     <div className="flex h-[100dvh] overflow-hidden bg-[#F6F6F7] dark:bg-[#111214] text-zinc-900 dark:text-zinc-100">
       <aside className={`flex shrink-0 flex-col border-r border-zinc-200 dark:border-white/10 bg-white dark:bg-[#17181c] transition-[width] ${collapsed ? "w-16" : "w-56"}`}>
         <div className={`flex items-center gap-3 py-5 ${collapsed ? "justify-center" : "px-5"}`}>
-          <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-zinc-200 dark:border-white/10 bg-zinc-50 dark:bg-white/[0.03] text-zinc-800 dark:text-zinc-200">
-            <UserRoundCog className="h-5 w-5" aria-hidden />
-            <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-[#D97757] ring-2 ring-white dark:ring-[#17181c]" aria-hidden />
-          </span>
+          <Logo className="h-10 w-10 shrink-0 rounded-[10px] dark:ring-1 dark:ring-white/10" />
           {!collapsed && (
             <div className="min-w-0 leading-tight">
               <p className="truncate text-[15px] font-semibold">{t("app.brand1")}</p>

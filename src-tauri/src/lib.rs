@@ -697,7 +697,7 @@ fn run_background_sync(state: &AppState, data_root: &Path, take_backup: bool) ->
         take_backup,
         selection.as_ref(),
     )?;
-    Ok(res.copied_new_files + res.created_conflict_companions + res.refreshed_metadata)
+    Ok(res.copied_new_files + res.created_conflict_companions + res.refreshed_metadata + res.continued_pointers)
 }
 
 /// Watches Claude Desktop's `lastKnownAccountUuid`. When a new account signs in, the UI is told

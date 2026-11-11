@@ -316,6 +316,7 @@ mod tests {
             account_label: String::new(),
             org_uuid: String::new(),
             cli_session_id: Some(id.into()),
+            prior_cli_session_ids: Vec::new(),
             cwd: Some("C:\\work\\demo".into()),
             origin_cwd: None,
             title: title.into(),

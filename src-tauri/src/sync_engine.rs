@@ -5,8 +5,10 @@
 //! 1. Source session files are NEVER deleted, moved, or modified.
 //! 2. Existing target session files are NEVER overwritten in place (`copy-missing` only,
 //!    or `conflict-preserve-companion` when a session diverged across accounts). The one
-//!    exception is `metadata-refresh`: a pointer to the same chat gets only `lastActivityAt`,
-//!    `completedTurns` and `title` from its newer copy, always after a verified backup.
+//!    exceptions are `metadata-refresh`: a pointer to the same chat gets only `lastActivityAt`,
+//!    `completedTurns` and `title` from its newer copy, and `continue-refresh`: a chat continued
+//!    under a new transcript id (old id in `priorCliSessionIds`) also gets `cliSessionId` and
+//!    `priorCliSessionIds`. Both always after a verified backup.
 //! 3. OAuth / server bridge tokens (`bridgeSessionIds`) are stripped (`[]`) when copying
 //!    session pointers across different accounts so credentials/tokens are never mixed.
 //! 4. Every sync execution requires a prior SHA-256 verified backup in the external backup
@@ -31,6 +33,9 @@ pub struct SessionRecord {
     pub account_label: String,
     pub org_uuid: String,
     pub cli_session_id: Option<String>,
+    /// `priorCliSessionIds`: earlier transcript ids of this chat (compaction/resume); empty if missing.
+    #[serde(default)]
+    pub prior_cli_session_ids: Vec<String>,
     pub cwd: Option<String>,
     pub origin_cwd: Option<String>,
     pub title: String,
@@ -143,6 +148,7 @@ pub fn pending_for_target(
         let Some(cli) = s.cli_session_id.as_deref() else { continue };
         if s.account_uuid.eq_ignore_ascii_case(target) {
             listed.insert(cli);
+            listed.extend(s.prior_cli_session_ids.iter().map(String::as_str));
         }
         if approved.get(&s.session_id).is_some_and(|t| t.as_ref().map_or(true, |t| t.contains(&target_lc))) {
             approved_cli.insert(cli);
@@ -151,7 +157,9 @@ pub fn pending_for_target(
     let mut newest: HashMap<&str, &SessionRecord> = HashMap::new();
     for s in &sessions {
         let Some(cli) = s.cli_session_id.as_deref() else { continue };
-        if s.transcript_unavailable || listed.contains(cli) || approved_cli.contains(cli) {
+        // A continuation of a chat the target lists is moved along by sync, not newly copied.
+        let continues_listed = s.prior_cli_session_ids.iter().any(|p| listed.contains(p.as_str()));
+        if s.transcript_unavailable || listed.contains(cli) || continues_listed || approved_cli.contains(cli) {
             continue;
         }
         let e = newest.entry(cli).or_insert(s);
@@ -244,9 +252,12 @@ pub struct SyncActionItem {
     pub action: String,
     pub reason: String,
     pub target_file_path: String,
-    /// `metadata-refresh` only: the target's `lastActivityAt` the preview saw (stale-write guard).
+    /// `metadata-refresh` / `continue-refresh`: the target's `lastActivityAt` the preview saw (stale-write guard).
     #[serde(skip)]
     pub target_last_activity_at: i64,
+    /// `continue-refresh` only: the target's `cliSessionId` the preview saw (stale-write guard).
+    #[serde(skip)]
+    pub target_cli_session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -259,6 +270,8 @@ pub struct SyncPreviewReport {
     pub copy_new_count: usize,
     pub conflict_companion_count: usize,
     pub metadata_refresh_count: usize,
+    #[serde(default)]
+    pub continue_refresh_count: usize,
     pub identical_skip_count: usize,
     pub unhealthy_skip_count: usize,
     pub sidebar_groups_to_merge: usize,
@@ -272,6 +285,8 @@ pub struct SyncExecutionResult {
     pub copied_new_files: usize,
     pub created_conflict_companions: usize,
     pub refreshed_metadata: usize,
+    #[serde(default)]
+    pub continued_pointers: usize,
     pub skipped_identical: usize,
     pub merged_sidebar_groups: usize,
     pub completed_at: String,
@@ -301,6 +316,14 @@ pub fn index_available_cli_transcripts(projects_dir: &Path) -> HashSet<String> {
 /// Drops chats of account folders not in `accounts` (hidden accounts): they are no sync source.
 fn retain_listed(sessions: &mut Vec<SessionRecord>, accounts: &[AccountProfile]) {
     sessions.retain(|s| accounts.iter().any(|a| a.account_uuid.eq_ignore_ascii_case(&s.account_uuid)));
+}
+
+/// `priorCliSessionIds` as strings; missing, non-array or non-string entries are ignored.
+fn prior_cli_ids(val: &Value) -> Vec<String> {
+    val.get("priorCliSessionIds")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from).collect())
+        .unwrap_or_default()
 }
 
 /// Scan all `local_*.json` session pointers across all accounts in `data_root`.
@@ -431,6 +454,7 @@ pub fn scan_all_sessions(
                     account_label: account_label.clone(),
                     org_uuid: org_uuid.clone(),
                     cli_session_id,
+                    prior_cli_session_ids: prior_cli_ids(&val),
                     cwd,
                     origin_cwd,
                     title,
@@ -684,16 +708,25 @@ pub fn preview_sync(
 
     // (account, CLI transcript id) pairs each account already lists, plus those planned in this run.
     // The transcript `.jsonl` is shared by all accounts, so a second pointer to it is a duplicate chat.
+    // A pointer's `priorCliSessionIds` count too: an account that moved on from a transcript must not
+    // get the older state back as another chat (e.g. a "[Continued in …]" companion from older versions).
     let mut transcript_in_acc: HashSet<(String, String)> = all_sessions
         .iter()
         .filter(|s| !s.transcript_unavailable)
-        .filter_map(|s| s.cli_session_id.clone().map(|c| (s.account_uuid.clone(), c)))
+        .flat_map(|s| {
+            s.cli_session_id
+                .iter()
+                .chain(&s.prior_cli_session_ids)
+                .map(|c| (s.account_uuid.clone(), c.clone()))
+                .collect::<Vec<_>>()
+        })
         .collect();
 
     let mut actions: Vec<SyncActionItem> = Vec::new();
     let mut copy_new_count = 0usize;
     let mut conflict_companion_count = 0usize;
     let mut metadata_refresh_count = 0usize;
+    let mut continue_refresh_count = 0usize;
     let mut identical_skip_count = 0usize;
     let mut unhealthy_skip_count = 0usize;
 
@@ -764,6 +797,7 @@ pub fn preview_sync(
                         .to_string_lossy()
                         .into_owned(),
                     target_last_activity_at: 0,
+                    target_cli_session_id: None,
                 });
                 continue;
             }
@@ -772,6 +806,42 @@ pub fn preview_sync(
                 target_acc.account_uuid.clone(),
                 best_source.cli_session_id.clone().unwrap_or_default(),
             );
+            // Same pointer, but the source continued the chat under a new transcript id (compaction /
+            // resume lists the target's id in `priorCliSessionIds`): move the target's pointer along
+            // instead of adding a "[Continued in …]" companion. Also when an old companion already lists
+            // the new id, so the original pointer catches up.
+            let continued = by_acc_and_sid
+                .get(&(target_acc.account_uuid.clone(), sid.clone()))
+                .filter(|t| {
+                    !t.transcript_unavailable
+                        && t.cli_session_id != best_source.cli_session_id
+                        && t.cli_session_id.as_ref().is_some_and(|c| best_source.prior_cli_session_ids.contains(c))
+                        && best_source.last_activity_at > t.last_activity_at
+                });
+            if let Some(t) = continued {
+                continue_refresh_count += 1;
+                transcript_in_acc.insert(transcript_key);
+                actions.push(SyncActionItem {
+                    session_id: best_source.session_id.clone(),
+                    title: best_source.title.clone(),
+                    cwd: best_source.cwd.clone(),
+                    cli_session_id: best_source.cli_session_id.clone(),
+                    source_account_uuid: best_source.account_uuid.clone(),
+                    source_account_label: best_source.account_label.clone(),
+                    target_account_uuid: target_acc.account_uuid.clone(),
+                    target_account_label: target_acc.label.clone(),
+                    target_org_uuid: target_acc.org_uuid.clone(),
+                    action: "continue-refresh".to_string(),
+                    reason: format!(
+                        "Continued in '{}' under a new transcript id: the existing pointer is updated in place ({} -> {} turns)",
+                        best_source.account_label, t.completed_turns, best_source.completed_turns
+                    ),
+                    target_file_path: t.file_path.clone(),
+                    target_last_activity_at: t.last_activity_at,
+                    target_cli_session_id: t.cli_session_id.clone(),
+                });
+                continue;
+            }
             if transcript_in_acc.contains(&transcript_key) {
                 // Target already lists this exact chat (maybe under another session id): never add it twice.
                 // If it is the same pointer with an older date, only its date/turns/title get refreshed.
@@ -801,6 +871,7 @@ pub fn preview_sync(
                         ),
                         target_file_path: t.file_path.clone(),
                         target_last_activity_at: t.last_activity_at,
+                        target_cli_session_id: t.cli_session_id.clone(),
                     });
                     continue;
                 }
@@ -823,6 +894,7 @@ pub fn preview_sync(
                         .to_string_lossy()
                         .into_owned(),
                     target_last_activity_at: 0,
+                    target_cli_session_id: None,
                 });
                 continue;
             }
@@ -856,6 +928,7 @@ pub fn preview_sync(
                             .to_string_lossy()
                             .into_owned(),
                         target_last_activity_at: 0,
+                        target_cli_session_id: None,
                     });
                 }
                 Some(existing_target) => {
@@ -891,6 +964,7 @@ pub fn preview_sync(
                         ),
                         target_file_path: comp_file.to_string_lossy().into_owned(),
                         target_last_activity_at: 0,
+                        target_cli_session_id: None,
                     });
                 }
             }
@@ -901,7 +975,7 @@ pub fn preview_sync(
     actions.sort_by(|a, b| {
         let rank = |act: &str| match act {
             "copy-new" => 0,
-            "conflict-companion" | "metadata-refresh" => 1,
+            "conflict-companion" | "metadata-refresh" | "continue-refresh" => 1,
             "skip-unhealthy" => 2,
             _ => 3,
         };
@@ -920,6 +994,7 @@ pub fn preview_sync(
         copy_new_count,
         conflict_companion_count,
         metadata_refresh_count,
+        continue_refresh_count,
         identical_skip_count,
         unhealthy_skip_count,
         sidebar_groups_to_merge,
@@ -930,23 +1005,42 @@ pub fn preview_sync(
 /// The only keys a `metadata-refresh` copies into an existing pointer.
 const METADATA_KEYS: [&str; 3] = ["lastActivityAt", "completedTurns", "title"];
 
-/// `target_raw` with only `METADATA_KEYS` taken from `source`; every other key keeps its value.
+/// The only keys a `continue-refresh` copies: the chat's transcript ids plus `METADATA_KEYS`.
+const CONTINUE_KEYS: [&str; 5] = ["cliSessionId", "priorCliSessionIds", "lastActivityAt", "completedTurns", "title"];
+
+/// `target_raw` with only `METADATA_KEYS` (or `CONTINUE_KEYS` when `continued_from` is the target's
+/// cli id the preview saw) taken from `source`; every other key keeps its value.
 /// `None` when the target is not a JSON object, changed since the preview (`lastActivityAt` differs
-/// from `expected_last_activity`), points to another transcript, or the source is not newer.
-fn refresh_metadata_json(target_raw: &str, source: &Value, expected_last_activity: i64) -> Option<Vec<u8>> {
+/// from `expected_last_activity`), points to another transcript than expected, or the source is not newer.
+/// A continuation also needs the target's cli id in the source's `priorCliSessionIds`.
+fn refresh_metadata_json(
+    target_raw: &str,
+    source: &Value,
+    expected_last_activity: i64,
+    continued_from: Option<&str>,
+) -> Option<Vec<u8>> {
     let mut target: Value = serde_json::from_str(target_raw).ok()?;
     let obj = target.as_object_mut()?;
     let target_cli = obj.get("cliSessionId").and_then(|v| v.as_str());
     let source_cli = source.get("cliSessionId").and_then(|v| v.as_str());
     let source_last = source.get("lastActivityAt").and_then(|v| v.as_i64());
+    let same_chat = match continued_from {
+        None => target_cli == source_cli,
+        Some(expected_cli) => {
+            target_cli == Some(expected_cli)
+                && source_cli.is_some_and(|s| !s.is_empty() && s != expected_cli)
+                && prior_cli_ids(source).iter().any(|p| p == expected_cli)
+        }
+    };
     if obj.get("lastActivityAt").and_then(|v| v.as_i64()) != Some(expected_last_activity)
         || target_cli.is_none()
-        || target_cli != source_cli
+        || !same_chat
         || !source_last.is_some_and(|s| s > expected_last_activity)
     {
         return None;
     }
-    for key in METADATA_KEYS {
+    let keys: &[&str] = if continued_from.is_some() { &CONTINUE_KEYS } else { &METADATA_KEYS };
+    for &key in keys {
         if let Some(v) = source.get(key) {
             obj.insert(key.to_string(), v.clone());
         }
@@ -954,10 +1048,21 @@ fn refresh_metadata_json(target_raw: &str, source: &Value, expected_last_activit
     serde_json::to_vec_pretty(&target).ok()
 }
 
+/// New bytes for a staged `metadata-refresh` / `continue-refresh` item, or `None` to leave the target alone.
+fn refreshed_bytes(item: &SyncActionItem, target_raw: &str, source: &Value) -> Option<Vec<u8>> {
+    let continued_from = if item.action == "continue-refresh" {
+        Some(item.target_cli_session_id.as_deref()?)
+    } else {
+        None
+    };
+    refresh_metadata_json(target_raw, source, item.target_last_activity_at, continued_from)
+}
+
 /// Execute the non-destructive session synchronization across accounts.
 /// - Creates a SHA-256 verified backup in `backup_storage_dir` BEFORE any write.
 /// - Never deletes or moves a session file; an existing one is only touched by
-///   `metadata-refresh` (date/turns/title), and only while Claude Desktop is not running.
+///   `metadata-refresh` (date/turns/title) or `continue-refresh` (plus transcript ids), and only
+///   while Claude Desktop is not running.
 /// - Strips `bridgeSessionIds` (`[]`) so OAuth/bridge tokens never cross accounts.
 /// - Checks for file locks and aborts cleanly if any unexpected error occurs.
 pub fn execute_sync(
@@ -1019,7 +1124,7 @@ fn execute_sync_inner(
         .collect();
 
     for item in &preview.actions {
-        if item.action == "metadata-refresh" {
+        if item.action == "metadata-refresh" || item.action == "continue-refresh" {
             if !allow_metadata_refresh {
                 continue;
             }
@@ -1033,7 +1138,7 @@ fn execute_sync_inner(
                 let writable = !is_file_locked(target_path)
                     && fs::read_to_string(target_path)
                         .ok()
-                        .and_then(|raw| refresh_metadata_json(&raw, &source, item.target_last_activity_at))
+                        .and_then(|raw| refreshed_bytes(item, &raw, &source))
                         .is_some();
                 if writable {
                     staged_refreshes.push((item, source));
@@ -1104,6 +1209,7 @@ fn execute_sync_inner(
             copied_new_files: 0,
             created_conflict_companions: 0,
             refreshed_metadata: 0,
+            continued_pointers: 0,
             skipped_identical: preview.identical_skip_count,
             merged_sidebar_groups: 0,
             completed_at: chrono::Utc::now().to_rfc3339(),
@@ -1118,10 +1224,11 @@ fn execute_sync_inner(
             data_root,
             backup_storage_dir,
             &format!(
-                "Pre-sync verified snapshot ({} new, {} conflict-companions, {} metadata refreshes)",
+                "Pre-sync verified snapshot ({} new, {} conflict-companions, {} metadata refreshes, {} continued pointers)",
                 preview.copy_new_count,
                 preview.conflict_companion_count,
-                staged_refreshes.len()
+                staged_refreshes.iter().filter(|(i, _)| i.action == "metadata-refresh").count(),
+                staged_refreshes.iter().filter(|(i, _)| i.action == "continue-refresh").count()
             ),
             mode,
         )?
@@ -1148,12 +1255,13 @@ fn execute_sync_inner(
     }
 
     let mut refreshed_metadata = 0usize;
+    let mut continued_pointers = 0usize;
     for (item, source) in staged_refreshes {
         let target_path = Path::new(&item.target_file_path);
         // Re-read right before writing: Desktop may have rewritten it while the backup ran.
         let Some(bytes) = fs::read_to_string(target_path)
             .ok()
-            .and_then(|raw| refresh_metadata_json(&raw, &source, item.target_last_activity_at))
+            .and_then(|raw| refreshed_bytes(item, &raw, &source))
         else {
             continue;
         };
@@ -1161,7 +1269,11 @@ fn execute_sync_inner(
             continue;
         }
         atomic_write_verified(target_path, &bytes)?;
-        refreshed_metadata += 1;
+        if item.action == "continue-refresh" {
+            continued_pointers += 1;
+        } else {
+            refreshed_metadata += 1;
+        }
     }
 
     // 4. Additively merge sidebar groups (`dframe-group-scopes`) if enabled
@@ -1177,11 +1289,12 @@ fn execute_sync_inner(
         "session-sync",
         mode,
         &format!(
-            "Synced across {} accounts: {} new copied, {} conflict companions created, {} metadata refreshed, {} identical skipped, {} sidebar groups merged [Backup: {}]",
+            "Synced across {} accounts: {} new copied, {} conflict companions created, {} metadata refreshed, {} continued pointers updated, {} identical skipped, {} sidebar groups merged [Backup: {}]",
             accounts.len(),
             copied_new_files,
             created_conflict_companions,
             refreshed_metadata,
+            continued_pointers,
             preview.identical_skip_count,
             merged_sidebar_groups,
             backup_id
@@ -1194,6 +1307,7 @@ fn execute_sync_inner(
         copied_new_files,
         created_conflict_companions,
         refreshed_metadata,
+        continued_pointers,
         skipped_identical: preview.identical_skip_count,
         merged_sidebar_groups,
         completed_at,
@@ -1533,9 +1647,9 @@ mod tests {
 
         // Stale-write guard: a target that changed since the preview is left alone.
         let source = json!({"cliSessionId": "cli-1", "lastActivityAt": 300});
-        assert!(refresh_metadata_json(r#"{"cliSessionId":"cli-1","lastActivityAt":250}"#, &source, 200).is_none());
-        assert!(refresh_metadata_json(r#"{"cliSessionId":"cli-2","lastActivityAt":200}"#, &source, 200).is_none());
-        assert!(refresh_metadata_json("not json", &source, 200).is_none());
+        assert!(refresh_metadata_json(r#"{"cliSessionId":"cli-1","lastActivityAt":250}"#, &source, 200, None).is_none());
+        assert!(refresh_metadata_json(r#"{"cliSessionId":"cli-2","lastActivityAt":200}"#, &source, 200, None).is_none());
+        assert!(refresh_metadata_json("not json", &source, 200, None).is_none());
     }
 
     #[test]
@@ -1638,5 +1752,220 @@ mod tests {
         assert_eq!(pending[0].source_account_uuid, acc_a.account_uuid);
 
         assert!(pending_for_target(&data_root, projects, &accounts, None, &acc_b.account_uuid).is_empty());
+    }
+
+    /// Two accounts with empty session folders and a `proj` transcript folder.
+    struct Env {
+        _temp: tempfile::TempDir,
+        data_root: PathBuf,
+        projects_dir: PathBuf,
+        backups_dir: PathBuf,
+        accounts: Vec<AccountProfile>,
+    }
+
+    fn env() -> Env {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("claude-data");
+        let projects_dir = temp.path().join("cli-projects");
+        let backups_dir = temp.path().join("backups");
+        let accounts = vec![
+            sample_account("aaaa1111-0000-0000-0000-000000000001", "org-aaaa", "A", true),
+            sample_account("bbbb2222-0000-0000-0000-000000000002", "org-bbbb", "B", false),
+        ];
+        for acc in &accounts {
+            fs::create_dir_all(data_root.join("claude-code-sessions").join(&acc.account_uuid).join(&acc.org_uuid)).unwrap();
+        }
+        fs::create_dir_all(projects_dir.join("proj")).unwrap();
+        Env { _temp: temp, data_root, projects_dir, backups_dir, accounts }
+    }
+
+    impl Env {
+        fn dir(&self, i: usize) -> PathBuf {
+            let acc = &self.accounts[i];
+            self.data_root.join("claude-code-sessions").join(&acc.account_uuid).join(&acc.org_uuid)
+        }
+        /// Writes pointer `sid` (with its transcript) into account `i`; returns its path and JSON.
+        fn pointer(&self, i: usize, sid: &str, cli: &str, prior: &[&str], last: i64, turns: i64, title: &str) -> (PathBuf, Value) {
+            fs::write(self.projects_dir.join("proj").join(format!("{cli}.jsonl")), "{}").unwrap();
+            let v = json!({"sessionId": sid, "cliSessionId": cli, "priorCliSessionIds": prior, "title": title,
+                "createdAt": 1i64, "lastActivityAt": last, "completedTurns": turns, "model": format!("model-{i}"),
+                "bridgeSessionIds": [format!("tok-{i}")], "someUnknownKey": {"acc": i}});
+            let path = self.dir(i).join(format!("{sid}.json"));
+            fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+            (path, v)
+        }
+        fn preview(&self) -> SyncPreviewReport {
+            preview_sync(&self.data_root, &self.projects_dir, &self.accounts, "sandbox", None)
+        }
+        fn run(&self, desktop_closed: bool) -> SyncExecutionResult {
+            execute_sync_inner(&self.data_root, &self.projects_dir, &self.backups_dir, &self.accounts, false, "sandbox", false, desktop_closed, None).unwrap()
+        }
+        fn backups(&self) -> usize {
+            fs::read_dir(&self.backups_dir).map(|d| d.flatten().filter(|e| e.path().is_dir()).count()).unwrap_or(0)
+        }
+    }
+
+    fn read_json(path: &Path) -> Value {
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn writes(p: &SyncPreviewReport) -> usize {
+        p.copy_new_count + p.conflict_companion_count + p.metadata_refresh_count + p.continue_refresh_count
+    }
+
+    #[test]
+    fn continued_chat_updates_the_existing_pointer_in_place() {
+        let e = env();
+        let (path_b, b_before) = e.pointer(1, "local_s1", "cli-old", &["cli-older"], 100, 3, "old title");
+        let (path_a, a_json) = e.pointer(0, "local_s1", "cli-new", &["cli-older", "cli-old"], 200, 8, "new title");
+        let hash_a = sha256_file(&path_a).unwrap();
+        let hash_b = sha256_file(&path_b).unwrap();
+
+        let p = e.preview();
+        assert_eq!((p.continue_refresh_count, p.conflict_companion_count, p.copy_new_count), (1, 0, 0), "{:?}", p.actions);
+        // "ask" mode: no approval needed, and the continuation is not offered as a new chat either.
+        let ask = preview_sync(&e.data_root, &e.projects_dir, &e.accounts, "sandbox", Some(&empty_selection()));
+        assert_eq!(ask.continue_refresh_count, 1);
+        assert!(pending_for_target(&e.data_root, &e.projects_dir, &e.accounts, Some(&empty_selection()), &e.accounts[1].account_uuid).is_empty());
+
+        // Desktop running: nothing written, no backup.
+        let res = e.run(false);
+        assert_eq!(res.continued_pointers, 0);
+        assert!(res.pre_sync_backup_id.is_empty());
+        assert_eq!(sha256_file(&path_b).unwrap(), hash_b);
+        assert_eq!(e.backups(), 0);
+
+        // Desktop closed: updated in place after a forced backup (take_backup = false).
+        let res = e.run(true);
+        assert_eq!((res.continued_pointers, res.created_conflict_companions, res.refreshed_metadata), (1, 0, 0));
+        assert!(!res.pre_sync_backup_id.is_empty() && !res.pre_sync_backup_id.starts_with("none"));
+        assert_eq!(e.backups(), 1);
+        let b_after = read_json(&path_b);
+        let strip = |v: &Value| {
+            let mut v = v.clone();
+            for key in CONTINUE_KEYS {
+                v.as_object_mut().unwrap().remove(key);
+            }
+            v
+        };
+        assert_eq!(strip(&b_after), strip(&b_before), "only the five keys may change");
+        for key in CONTINUE_KEYS {
+            assert_eq!(b_after[key], a_json[key], "{key} must come from A");
+        }
+        assert_eq!(b_after["bridgeSessionIds"], json!(["tok-1"]));
+        assert_eq!(sha256_file(&path_a).unwrap(), hash_a, "source untouched");
+        assert_eq!(fs::read_dir(e.dir(1)).unwrap().count(), 1, "no companion");
+        let journal = crate::backup::read_journal(&e.backups_dir, 1);
+        assert!(journal[0].details.contains("1 continued pointers updated"), "{}", journal[0].details);
+
+        // No ping-pong: the pair is identical now, and an idle run takes no backup.
+        assert_eq!(writes(&e.preview()), 0);
+        assert!(e.run(true).pre_sync_backup_id.is_empty());
+    }
+
+    #[test]
+    fn continue_refresh_stale_guard() {
+        let e = env();
+        let (path_b, _) = e.pointer(1, "local_s1", "cli-old", &[], 100, 3, "old");
+        let (path_a, _) = e.pointer(0, "local_s1", "cli-new", &["cli-old"], 200, 8, "new");
+        let p = e.preview();
+        let item = p.actions.iter().find(|a| a.action == "continue-refresh").unwrap();
+        let source = read_json(&path_a);
+        assert!(refreshed_bytes(item, &fs::read_to_string(&path_b).unwrap(), &source).is_some());
+
+        // Target changed since the preview (date or transcript id): left alone.
+        assert!(refreshed_bytes(item, r#"{"cliSessionId":"cli-old","lastActivityAt":150}"#, &source).is_none());
+        assert!(refreshed_bytes(item, r#"{"cliSessionId":"cli-other","lastActivityAt":100}"#, &source).is_none());
+        // Source no longer lists the target's id as prior, or is not newer.
+        let not_prior = json!({"cliSessionId": "cli-new", "priorCliSessionIds": "cli-old", "lastActivityAt": 200});
+        assert!(refreshed_bytes(item, r#"{"cliSessionId":"cli-old","lastActivityAt":100}"#, &not_prior).is_none());
+        let older = json!({"cliSessionId": "cli-new", "priorCliSessionIds": ["cli-old"], "lastActivityAt": 90});
+        assert!(refreshed_bytes(item, r#"{"cliSessionId":"cli-old","lastActivityAt":100}"#, &older).is_none());
+
+        // Desktop rewrote the target between preview and write: execute skips it.
+        let mut changed = read_json(&path_b);
+        changed["lastActivityAt"] = json!(150);
+        fs::write(&path_b, serde_json::to_vec_pretty(&changed).unwrap()).unwrap();
+        let hash_b = sha256_file(&path_b).unwrap();
+        let res = execute_sync_inner(&e.data_root, &e.projects_dir, &e.backups_dir, &e.accounts, false, "sandbox", false, true, None).unwrap();
+        assert_eq!(res.created_conflict_companions, 0);
+        // The fresh preview inside execute sees 150 and updates it; that is the newest state, not a stale write.
+        assert_eq!(res.continued_pointers, 1);
+        assert_ne!(sha256_file(&path_b).unwrap(), hash_b);
+        assert_eq!(read_json(&path_b)["cliSessionId"], "cli-new");
+    }
+
+    #[test]
+    fn truly_diverged_chat_still_gets_a_companion() {
+        let e = env();
+        e.pointer(1, "local_s1", "cli-b", &[], 100, 3, "t");
+        e.pointer(0, "local_s1", "cli-a", &["cli-x"], 200, 8, "t");
+        let p = e.preview();
+        assert_eq!((p.conflict_companion_count, p.continue_refresh_count), (1, 0));
+        let res = e.run(true);
+        assert_eq!((res.created_conflict_companions, res.continued_pointers), (1, 0));
+        assert_eq!(read_json(&e.dir(1).join("local_s1.json"))["cliSessionId"], "cli-b", "original untouched");
+    }
+
+    #[test]
+    fn target_ahead_is_never_overwritten_with_older_data() {
+        // B continued the chat (cli-new, prior cli-old) and is newer: B is the source, A gets moved along.
+        let e = env();
+        let (path_a, _) = e.pointer(0, "local_s1", "cli-old", &[], 100, 3, "old");
+        let (path_b, _) = e.pointer(1, "local_s1", "cli-new", &["cli-old"], 200, 8, "new");
+        let hash_b = sha256_file(&path_b).unwrap();
+        let p = e.preview();
+        let acts: Vec<String> = p.actions.iter().map(|a| format!("{}>{}", a.action, a.target_account_label)).collect();
+        assert_eq!(acts, ["continue-refresh>A"]);
+        e.run(true);
+        assert_eq!(read_json(&path_a)["cliSessionId"], "cli-new");
+        assert_eq!(sha256_file(&path_b).unwrap(), hash_b);
+        assert_eq!(writes(&e.preview()), 0);
+
+        // The best-source rule picks the OLD side (more turns): the newer target is skipped, not overwritten.
+        let e = env();
+        e.pointer(0, "local_s1", "cli-old", &[], 100, 50, "old");
+        let (path_b, _) = e.pointer(1, "local_s1", "cli-new", &["cli-old"], 200, 8, "new");
+        let hash_b = sha256_file(&path_b).unwrap();
+        let p = e.preview();
+        assert_eq!(writes(&p), 0, "{:?}", p.actions);
+        let res = e.run(true);
+        assert_eq!((res.continued_pointers, res.created_conflict_companions, res.copied_new_files), (0, 0, 0));
+        assert_eq!(sha256_file(&path_b).unwrap(), hash_b);
+        assert_eq!(fs::read_dir(e.dir(1)).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn old_companion_stays_and_original_pointer_catches_up() {
+        let e = env();
+        let (orig_b, _) = e.pointer(1, "local_s1", "cli-1", &[], 100, 3, "chat");
+        let (comp_b, _) = e.pointer(1, "local_comp", "cli-2", &["cli-1"], 150, 5, "chat [Continued in A]");
+        let comp_hash = sha256_file(&comp_b).unwrap();
+        e.pointer(0, "local_s1", "cli-2", &["cli-1"], 200, 6, "chat");
+
+        // The companion already lists cli-2: the original is still moved along, nothing new is created.
+        let p = e.preview();
+        assert_eq!((p.continue_refresh_count, p.conflict_companion_count, p.copy_new_count), (1, 0, 0), "{:?}", p.actions);
+        e.run(true);
+        assert_eq!(read_json(&orig_b)["cliSessionId"], "cli-2");
+
+        // The chat continues again in A: B's original follows, the companion is not copied back to A.
+        e.pointer(0, "local_s1", "cli-3", &["cli-1", "cli-2"], 300, 9, "chat");
+        let p = e.preview();
+        assert_eq!((p.continue_refresh_count, p.conflict_companion_count, p.copy_new_count), (1, 0, 0), "{:?}", p.actions);
+        e.run(true);
+        let orig = read_json(&orig_b);
+        assert_eq!((orig["cliSessionId"].as_str(), orig["priorCliSessionIds"].clone()), (Some("cli-3"), json!(["cli-1", "cli-2"])));
+        assert_eq!(sha256_file(&comp_b).unwrap(), comp_hash, "old companion untouched");
+        assert_eq!(fs::read_dir(e.dir(1)).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(e.dir(0)).unwrap().count(), 1);
+        assert_eq!(writes(&e.preview()), 0);
+    }
+
+    #[test]
+    fn prior_ids_tolerate_missing_or_odd_values() {
+        assert!(prior_cli_ids(&json!({})).is_empty());
+        assert!(prior_cli_ids(&json!({"priorCliSessionIds": "x"})).is_empty());
+        assert_eq!(prior_cli_ids(&json!({"priorCliSessionIds": ["a", 1, null, "", "b"]})), ["a", "b"]);
     }
 }
